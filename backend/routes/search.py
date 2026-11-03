@@ -1,3 +1,5 @@
+from collections import Counter
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 
 from fastapi import APIRouter, HTTPException, Query, Depends
@@ -14,16 +16,17 @@ from services.scan import (
     SORT_INDEX_PATH,
     SORT_INDEX_SIZE,
     SORT_INDEX_PACKET_COUNT,
-    TMP_KEY_TTL_SECONDS,
-    TMP_RESULT_PREFIX,
     get_all_protocols
 )
 from utils.protocols_utils import rank_protocols
-from uuid import uuid4
 
 
 router = APIRouter(tags=["Search"])
 logger = get_logger(__name__)
+
+# Facets are counted over at most this many matching files to keep a broad
+# query (e.g. "eth") cheap on large catalogs.
+FACET_SAMPLE_LIMIT = 5000
 
 
 class SortField(str, Enum):
@@ -40,227 +43,234 @@ SORT_FIELD_TO_INDEX = {
     SortField.count: SORT_INDEX_PACKET_COUNT,
 }
 
-def resolve_protocols(
-    query: str,
-    protocol_candidates: list[str],
-    *,
-    min_prefix_len: int = 3,
-    max_contains_matches: int = 5,
-    max_prefix_matches: int = 3,
-    max_fuzzy: int = 10,
-) -> list[str]:
-    q_low = query.lower().strip()
-    words = q_low.split()
 
-    p_exact, p_contains, p_prefix = [], [], []
+@dataclass
+class ParsedQuery:
+    """What a search string means.
 
-    for proto in protocol_candidates:
-        c_low = proto.lower() #rename pl to c_low
-
-        # Check that candidate is matching with any keywords
-        for word in words:
-            # Exact match
-            if c_low == word:
-                if proto not in p_exact:
-                    p_exact.append(proto)
-                break
-
-            # Prefix match
-            if c_low.startswith(word) and len(word) >= min_prefix_len:
-                if proto not in p_prefix and len(p_prefix) < max_prefix_matches:
-                    p_prefix.append(proto)
-                break
-
-            # Contains match
-            if word in c_low:
-                if proto not in p_contains and len(p_contains) < max_contains_matches:
-                    p_contains.append(proto)
-                break
-
-    results = p_exact + p_prefix + p_contains
-
-    return results[:max_fuzzy]
-
-def parse_shorthand_query(raw: str):
+    A file matches when it has every protocol in `all`, at least one protocol
+    from each group in `any`, none of the protocols in `none`, and a filename
+    containing every string in `name` and none in `not_name`.
     """
-    Supports both "!" and "not"
+    all: list[str] = field(default_factory=list)
+    any: list[list[str]] = field(default_factory=list)
+    none: list[str] = field(default_factory=list)
+    name: list[str] = field(default_factory=list)
+    not_name: list[str] = field(default_factory=list)
+    # Parts of an OR group that are not known protocols; reported, not searched.
+    unknown: list[str] = field(default_factory=list)
+
+    @property
+    def wanted_protocols(self) -> set[str]:
+        return set(self.all) | {p for group in self.any for p in group}
+
+    def is_empty(self) -> bool:
+        return not (self.all or self.any or self.none or self.name or self.not_name)
+
+
+def _tokenize(raw: str) -> list[str]:
+    tokens = [t for t in re.split(r"[\s,]+", raw.strip()) if t]
+    # "sip OR rtp" is the same as "sip|rtp"
+    merged: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i].upper() == "OR" and merged and i + 1 < len(tokens):
+            merged[-1] = f"{merged[-1]}|{tokens[i + 1]}"
+            i += 2
+            continue
+        merged.append(tokens[i])
+        i += 1
+    return merged
+
+
+def parse_query(raw: str, known_protocols: set[str]) -> ParsedQuery:
+    """Grammar (tokens separated by spaces or commas):
+
+      sip           file contains protocol sip (if sip is a known protocol),
+                    otherwise its filename contains "sip"
+      !sip  -sip    file does not contain sip
+      isup|bicc     file contains isup or bicc (also: "isup OR bicc")
+      name:camel    filename contains "camel" (also file:camel)
     """
-    s = (raw or "").strip().lower()
-    if not s:
-        return [], []
+    q = ParsedQuery()
 
-    tokens = [t for t in re.compile(r"[,\s]+").split(s) if t]
-    include, exclude = [], []
-    
-    for t in tokens:
-        if t.startswith("!"):
-            v = t[1:].strip()
-            if v:
-                exclude.append(v)
-        else:
-            include.append(t)
+    def add_unique(target: list, value) -> None:
+        if value not in target:
+            target.append(value)
 
-    def dedup(xs):
-        out, seen = [], set()
-        for x in xs:
-            if not x or x in seen:
+    for token in _tokenize(raw.lower()):
+        negate = token[0] in "!-" and len(token) > 1
+        if negate:
+            token = token[1:]
+
+        prefix, _, rest = token.partition(":")
+        if rest and prefix in ("name", "file"):
+            add_unique(q.not_name if negate else q.name, rest)
+            continue
+
+        if "|" in token:
+            parts = [p for p in token.split("|") if p]
+            group = [p for p in parts if p in known_protocols]
+            q.unknown.extend(p for p in parts if p not in known_protocols)
+            if not group:
                 continue
-            seen.add(x)
-            out.append(x)
-        return out
+            if negate:
+                # !(a|b) == !a !b
+                for p in group:
+                    add_unique(q.none, p)
+            elif len(group) == 1:
+                add_unique(q.all, group[0])
+            elif group not in q.any:
+                q.any.append(group)
+            continue
 
-    return dedup(include), dedup(exclude)
+        if token in known_protocols:
+            add_unique(q.none if negate else q.all, token)
+        else:
+            add_unique(q.not_name if negate else q.name, token)
 
-async def search_by_filename(query: str, redis, sort_index: str) -> set[str]:
-    q = query.lower().strip()
-    all_ids = await asyncio.to_thread(redis.zrange, sort_index, 0, -1)
-    if not all_ids:
-        return set()
+    return q
 
+
+def _proto_key(protocol: str) -> str:
+    return f"{PROTOCOCOL_INDEX_PREFIX}:{protocol}"
+
+
+def _matching_ids(redis, q: ParsedQuery) -> set[str]:
+    """Evaluate a parsed query with Redis set operations. Runs in a thread."""
+    if q.all:
+        ids = redis.sinter([_proto_key(p) for p in q.all])
+    elif q.any:
+        ids = redis.sunion([_proto_key(p) for p in q.any[0]])
+    else:
+        # Every indexed file has a size score, so this zset is the full catalog.
+        ids = set(redis.zrange(SORT_INDEX_SIZE, 0, -1))
+
+    for group in q.any:
+        if not ids:
+            break
+        ids &= redis.sunion([_proto_key(p) for p in group])
+
+    if ids and q.none:
+        ids -= redis.sunion([_proto_key(p) for p in q.none])
+
+    if ids and (q.name or q.not_name):
+        ordered = list(ids)
+        pipe = redis.pipeline()
+        for h in ordered:
+            pipe.hget(f"{PCAP_FILE_KEY_PREFIX}:{h}", "filename")
+        names = pipe.execute()
+        ids = {
+            h for h, fname in zip(ordered, names)
+            if fname is not None
+            and all(s in fname.lower() for s in q.name)
+            and not any(s in fname.lower() for s in q.not_name)
+        }
+
+    return ids
+
+
+def _sorted_page(redis, ids: set[str], sort_index: str, descending: bool, start: int, count: int) -> list[str]:
+    ordered = list(ids)
     pipe = redis.pipeline()
-    for h in all_ids:
-        pipe.hgetall(f"{PCAP_FILE_KEY_PREFIX}:{h}")
-    rows = await asyncio.to_thread(pipe.execute)
+    for h in ordered:
+        pipe.zscore(sort_index, h)
+    scores = pipe.execute()
+    # Files missing from the sort index (e.g. before the name index is rebuilt)
+    # go last; the hash keeps the order stable between pages.
+    missing = float("-inf") if descending else float("inf")
+    ranked = sorted(
+        zip(ordered, scores),
+        key=lambda pair: (missing if pair[1] is None else pair[1], pair[0]),
+        reverse=descending,
+    )
+    return [h for h, _ in ranked[start:start + count]]
 
-    return {
-        h for h, row in zip(all_ids, rows)
-        if row and query.lower() in row.get("filename", "").lower()
-    }
+
+def _facets(redis, ids: set[str]) -> list[dict]:
+    sample = list(ids)[:FACET_SAMPLE_LIMIT]
+    pipe = redis.pipeline()
+    for h in sample:
+        pipe.hget(f"{PCAP_FILE_KEY_PREFIX}:{h}", "protocols")
+    counts: Counter[str] = Counter()
+    for protocols in pipe.execute():
+        if protocols:
+            counts.update(p for p in protocols.split(",") if p)
+    return [{"protocol": p, "files": n} for p, n in counts.most_common()]
+
 
 @router.get("/search", summary="Search for pcaps by protocol or filename")
-async def fuzzy_search_pcaps(
+async def search_pcaps(
     protocol: str = Query(
-        "", description="The search query - matches protocol name AND filename"
+        "",
+        description=(
+            "Query. `sip rtp` = both, `isup|bicc` = either, `!rtp` = without, "
+            "`name:camel` = filename contains. Unknown words match filenames."
+        ),
     ),
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100),
     sort_by: SortField = Query(SortField.filename),
     descending: bool = Query(False),
+    facets: bool = Query(True, description="Include protocol counts over the matching files"),
     context: AppContext = Depends(get_app_context),
 ):
     redis = context.redis_client
     if not redis:
         raise HTTPException(503, "Redis unavailable")
 
-    sort_index = SORT_FIELD_TO_INDEX.get(sort_by)
-    protocol_resolved_set = set()
+    known = {p.lower() for p in await get_all_protocols(redis)}
+    q = parse_query(protocol, known)
 
-    base_tmp = f"{TMP_RESULT_PREFIX}:{uuid4().hex}"
-    tmp_set = f"{base_tmp}:set"
-    tmp_z = f"{base_tmp}:z"
-    tmp_sorted = f"{base_tmp}:sorted"
+    ids = await asyncio.to_thread(_matching_ids, redis, q)
+    total = len(ids)
+    logger.info("Search %r -> %s, %d results", protocol, asdict(q), total)
 
-    if not protocol.strip():
-        all_ids = await asyncio.to_thread(redis.zrange, sort_index, 0, -1)
-        if not all_ids:
-            return {"total": 0, "page": page, "limit": limit, "data": []}
-
-        pipe = redis.pipeline()
-        for h in all_ids:
-            pipe.sadd(tmp_set, h)
-        await asyncio.to_thread(pipe.execute)
-    else:
-        all_protocols = await get_all_protocols(redis)
-        protocol_candidates = list(all_protocols)
-
-        include_tokens, exclude_tokens = parse_shorthand_query(protocol)
-
-        protocol_for_resolve = " ".join(include_tokens).strip()
-
-        if not protocol_for_resolve:
-            protocol_for_resolve = " ".join(exclude_tokens).strip()
-
-        # resolve only include tokens to find candidate files
-        protocols = resolve_protocols(protocol_for_resolve, protocol_candidates)
-
-        protocol_resolved_set = {p.lower() for p in protocols}
-        protocol_keys = [f"{PROTOCOCOL_INDEX_PREFIX}:{p.lower()}" for p in protocols]
-
-        async def build_protocol_set():
-            if protocol_keys:
-                await asyncio.to_thread(redis.sunionstore, tmp_set, *protocol_keys)
-
-        filename_hashes, _ = await asyncio.gather(
-            search_by_filename(protocol, redis, sort_index),
-            build_protocol_set(),
-        )
-
-        if filename_hashes:
-            pipe = redis.pipeline()
-            for h in filename_hashes:
-                pipe.sadd(tmp_set, h)
-            await asyncio.to_thread(pipe.execute)
-
-    ## disable because of bug:
-    # searh for h1 -> not return h1 files because `json` in the these files
-    # file have protocol `JSON` which is excluded
-    # if excluded:
-    #     exclude_keys = [f"{PROTOCOCOL_INDEX_PREFIX}:{p.lower()}" for p in excluded]
-    #     await asyncio.to_thread(redis.sdiffstore, tmp_set, tmp_set, *exclude_keys)
-
-    total = await asyncio.to_thread(redis.scard, tmp_set)
-    logger.info(f"Search for protocol '{protocol}' yielded {total} results")
-
-    if total == 0:
-        return {"total": 0, "page": page, "limit": limit, "data": []}
-
-    await asyncio.to_thread(redis.zinterstore, tmp_z, {tmp_set: 1})
-
-    await asyncio.to_thread(
-        redis.zinterstore,
-        tmp_sorted,
-        {sort_index: 1, tmp_z: 0},
-    )
-
-    # TTLs
-    await asyncio.to_thread(redis.expire, tmp_set, TMP_KEY_TTL_SECONDS)
-    await asyncio.to_thread(redis.expire, tmp_z, TMP_KEY_TTL_SECONDS)
-    await asyncio.to_thread(redis.expire, tmp_sorted, TMP_KEY_TTL_SECONDS)
-
-    start = (page - 1) * limit
-    end = start + limit - 1
-
-    ids = await asyncio.to_thread(
-        redis.zrevrange if descending else redis.zrange,
-        tmp_sorted,
-        start,
-        end,
-    )
-
-    pipe = redis.pipeline()
-    for h in ids:
-        pipe.hgetall(f"{PCAP_FILE_KEY_PREFIX}:{h}")
-    rows = await asyncio.to_thread(pipe.execute)
-
-    results = []
-    internal_pcap_root = context.config.pcap.root_directory
-    prefix_str = context.config.pcap.prefix_str
-    for row in rows:
-        if not row:
-            continue
-
-        counts = json.loads(row.get("protocol_counts", "{}"))
-        if protocol_resolved_set:
-            matched = [p for p in counts.keys() if p.lower() in protocol_resolved_set]
-        else:
-            # Show all protocols if search query is filename
-            matched = list(counts.keys())
-
-        row["matched_protocols"] = matched
-        row["searched_protocol"] = protocol
-
-        if prefix_str:
-            row["path"] = row["path"].replace(
-                internal_pcap_root,
-                prefix_str,
-                1,
-            )
-
-        results.append(row) 
-
-    return {
+    response = {
         "total": total,
         "page": page,
         "limit": limit,
-        "data": results,
+        "data": [],
+        "query": asdict(q),
+        "facets": [],
+        "suggestions": [],
     }
+
+    if total == 0:
+        # Offer close protocol names for words that matched nothing.
+        words = q.name + q.unknown
+        seen: set[str] = set()
+        for word in words:
+            for p in rank_protocols(word, list(known), max_dist=0.45)[:3]:
+                if p not in seen:
+                    seen.add(p)
+                    response["suggestions"].append(p)
+        return response
+
+    sort_index = SORT_FIELD_TO_INDEX[sort_by]
+    start = (page - 1) * limit
+    page_ids = await asyncio.to_thread(_sorted_page, redis, ids, sort_index, descending, start, limit)
+
+    pipe = redis.pipeline()
+    for h in page_ids:
+        pipe.hgetall(f"{PCAP_FILE_KEY_PREFIX}:{h}")
+    rows = await asyncio.to_thread(pipe.execute)
+
+    wanted = q.wanted_protocols
+    internal_pcap_root = context.config.pcap.root_directory
+    prefix_str = context.config.pcap.prefix_str
+    for h, row in zip(page_ids, rows):
+        if not row:
+            continue
+        counts = json.loads(row.get("protocol_counts", "{}"))
+        row["hash"] = h
+        row["matched_protocols"] = [p for p in counts if p.lower() in wanted]
+        row["searched_protocol"] = protocol
+        if prefix_str:
+            row["path"] = row["path"].replace(internal_pcap_root, prefix_str, 1)
+        response["data"].append(row)
+
+    if facets:
+        response["facets"] = await asyncio.to_thread(_facets, redis, ids)
+
+    return response

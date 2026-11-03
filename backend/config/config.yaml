@@ -13,11 +13,18 @@ pcap:
     - .cap
   scan_interval_seconds: 3600 # 1 hour
   scan_mode: fast # options: full, quick, fast
+  max_parallel_scans: 4 # files scanned at the same time
+  large_file_size: 512M # files this big or bigger are scanned one at a time
+  tshark_session_reset: 500000 # tshark -M: reset dissector state every N packets (0 = never)
   # Quick scan (tshark sampling) settings
   # for files >= min_file_size, and only scan `pebc` of bytes.
   quick_scan:
     pebc: 0.1
     min_file_size: 1024
     config_version: v1
+export:
+  cache_dir: /data/exports # filtered extracts, reused for the same file + filter
+  cache_max_size: 5G # oldest-used extracts are deleted above this
+  max_jobs: 2 # filter exports running at once
 log:
   level: INFO

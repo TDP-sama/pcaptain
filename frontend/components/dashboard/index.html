@@ -4,136 +4,150 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="dashboard-style.css">
+    <title>pcaptain · Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
-    <title>PCAP Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/base.css?v=20261103b">
+    <link rel="stylesheet" href="/dashboard/dashboard-style.css?v=20261103b">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 
 <body>
-    <div class="container">
-        <header>
-            <h1>PCAP Dashboard</h1>
-            <nav>
-                <a href="/" class="nav-link">
-                    <i class="fa fa-search"></i> Search
-                </a>
-                <button id="refreshBtn" class="refresh-btn" title="Refresh Data">
-                    <i class="fa fa-refresh"></i> Refresh
-                </button>
+<div class="app">
+    <header class="topbar">
+        <div class="topbar-left">
+            <div class="brand">
+                <span class="brand-name">pcaptain</span>
+                <span class="brand-sub">capture catalog</span>
+            </div>
+            <nav class="page-nav" aria-label="Pages">
+                <a href="/"><i class="fa fa-search" aria-hidden="true"></i> Search</a>
+                <a href="/dashboard/?v=20261103b" aria-current="page"><i class="fa fa-bar-chart" aria-hidden="true"></i> Dashboard</a>
             </nav>
-        </header>
-
-        <div id="loadingIndicator" class="loading-indicator hidden">
-            <div class="spinner"></div>
-            <p>Loading dashboard data...</p>
         </div>
-
-        <div id="errorMessage" class="error-message hidden"></div>
-
-        <div id="dashboardContent" class="dashboard-content hidden">
-            <div class="stats-overview">
-                <div class="overview-card">
-                    <div class="overview-icon">
-                        <i class="fa fa-files-o"></i>
-                    </div>
-                    <div class="overview-content">
-                        <div class="overview-label">Total Files</div>
-                        <div class="overview-value" id="totalFiles">0</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="stats-grid">
-                <!-- Protocol Presence -->
-                <div class="stat-card large">
-                    <h2>Protocol Presence</h2>
-                    <canvas id="protocolPresenceChart"></canvas>
-                </div>
-                
-                <!-- File Size Distribution -->
-                <div class="stat-card">
-                    <h2>File Size Distribution</h2>
-                    <canvas id="sizeDistChart"></canvas>
-                </div>
-
-                <!-- Packet Count Distribution -->
-                <div class="stat-card">
-                    <h2>Packet Count Distribution</h2>
-                    <canvas id="packetDistChart"></canvas>
-                </div>
-
-
-                <!-- Protocol Diversity -->
-                <div class="stat-card">
-                    <h2>Protocol Diversity</h2>
-                    <div class="diversity-container">
-                        <div class="diversity-chart">
-                            <canvas id="diversityChart"></canvas>
-                        </div>
-                        <div class="diversity-legend">
-                            <div class="legend-title">Distribution</div>
-                            <div id="diversityLegendList" class="legend-list"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Protocol Combinations -->
-                 <div class="stat-card">
-                    <h2>Protocol Combinations Distribution</h2>
-                    <div class="diversity-container">
-                        <div class="diversity-chart">
-                            <canvas id="protocolComboChart"></canvas>
-                        </div>
-                        <div class="diversity-legend">
-                            <div class="legend-title">Top Combinations</div>
-                            <div id="protocolComboLegendList" class="legend-list"></div>
-                        </div>
-                    </div>
-                 </div>
-
-                <!-- File Age Distribution -->
-                <div class="stat-card">
-                    <h2>File Age Distribution</h2>
-                    <canvas id="ageDistChart"></canvas>
-                </div>
-
-                <!-- Size Per Packet Distribution -->
-                <div class="stat-card">
-                    <h2>Avg. Packet Size Distribution</h2>
-                    <canvas id="sizePerPacketChart"></canvas>
-                </div>
-
-                <!-- Scan Mode Distribution -->
-                <div class="stat-card large">
-                    <h2>Scan Mode Distribution</h2>
-                    <div class="scan-mode-container">
-                        <div id="scanModeStats" class="scan-mode-stats"></div>
-                    </div>
-                </div>
-
-                <!-- File/Folder Table -->
-                <div class="stat-card large">
-                    <h2>File System Overview</h2>
-                    <div class="filesystem-container">
-                        <div class="filesystem-section">
-                            <h3>Directories</h3>
-                            <div id="directoryTable" class="data-table"></div>
-                        </div>
-                        <div class="filesystem-section">
-                            <h3>File Extensions</h3>
-                            <div id="extensionTable" class="data-table"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="metadata">
-                <p>Last updated: <span id="lastUpdated"></span></p>
-            </div>
+        <div class="topbar-actions">
+            <span id="serverStatus" class="status-pill" data-state="checking">Checking server</span>
+            <span id="lastUpdated" class="updated"></span>
+            <button id="refreshBtn" class="btn btn-secondary" type="button">
+                <i class="fa fa-refresh" aria-hidden="true"></i> <span>Refresh</span>
+            </button>
         </div>
-    </div>
-    <script src="../config.js"></script>
-    <script type="module" src="dashboard-script.js"></script>
+    </header>
+
+    <p id="statusLine" class="status-line" role="status">Loading the catalog summary…</p>
+
+    <main id="dashboard" class="dashboard" aria-busy="true">
+        <section class="tiles" aria-label="Catalog totals">
+            <div class="tile"><span class="tile-label">Captures</span><span class="tile-value" id="tileFiles">–</span></div>
+            <div class="tile"><span class="tile-label">Total size</span><span class="tile-value" id="tileSize">–</span></div>
+            <div class="tile"><span class="tile-label">Packets</span><span class="tile-value" id="tilePackets">–</span></div>
+            <div class="tile"><span class="tile-label">Distinct protocols</span><span class="tile-value" id="tileProtocols">–</span></div>
+            <div class="tile"><span class="tile-label">Decoded by tshark</span><span class="tile-value" id="tileFull">–</span>
+                <span class="tile-note" id="tileFullNote"></span></div>
+        </section>
+
+        <section class="card card-wide" data-chart="protocols">
+            <div class="card-head">
+                <div>
+                    <h2>Most common protocols</h2>
+                    <p class="card-sub">Captures containing each protocol, top 20. Click a bar to search for it.</p>
+                </div>
+                <button type="button" class="link-btn table-toggle">Show table</button>
+            </div>
+            <div class="chart-box chart-tall"><canvas id="protocolChart" aria-label="Captures per protocol"></canvas></div>
+            <div class="table-view" hidden></div>
+        </section>
+
+        <section class="card card-wide" data-chart="combos">
+            <div class="card-head">
+                <div>
+                    <h2>Common protocol stacks</h2>
+                    <p class="card-sub">Captures that contain exactly the same set of protocols. Click a row to find them.</p>
+                </div>
+            </div>
+            <ol id="comboList" class="rank-list"></ol>
+        </section>
+
+        <section class="card" data-chart="scanmode">
+            <div class="card-head">
+                <div>
+                    <h2>Scan coverage</h2>
+                    <p class="card-sub">How each capture was catalogued.</p>
+                </div>
+            </div>
+            <div id="scanModeBar" class="seg-bar" role="img"></div>
+            <ul id="scanModeLegend" class="seg-legend"></ul>
+        </section>
+
+        <section class="card" data-chart="diversity">
+            <div class="card-head">
+                <div>
+                    <h2>Protocols per capture</h2>
+                    <p class="card-sub">How many different protocols each capture holds.</p>
+                </div>
+                <button type="button" class="link-btn table-toggle">Show table</button>
+            </div>
+            <div class="chart-box"><canvas id="diversityChart" aria-label="Captures by number of protocols"></canvas></div>
+            <div class="table-view" hidden></div>
+        </section>
+
+        <section class="card" data-chart="size">
+            <div class="card-head">
+                <div><h2>File size</h2><p class="card-sub">Captures per size band.</p></div>
+                <button type="button" class="link-btn table-toggle">Show table</button>
+            </div>
+            <div class="chart-box"><canvas id="sizeChart" aria-label="Captures per size band"></canvas></div>
+            <div class="table-view" hidden></div>
+        </section>
+
+        <section class="card" data-chart="packets">
+            <div class="card-head">
+                <div><h2>Packets per capture</h2><p class="card-sub">Captures per packet-count band.</p></div>
+                <button type="button" class="link-btn table-toggle">Show table</button>
+            </div>
+            <div class="chart-box"><canvas id="packetChart" aria-label="Captures per packet-count band"></canvas></div>
+            <div class="table-view" hidden></div>
+        </section>
+
+        <section class="card" data-chart="pktsize">
+            <div class="card-head">
+                <div><h2>Average packet size</h2><p class="card-sub">File size divided by packet count.</p></div>
+                <button type="button" class="link-btn table-toggle">Show table</button>
+            </div>
+            <div class="chart-box"><canvas id="pktSizeChart" aria-label="Captures per average packet size"></canvas></div>
+            <div class="table-view" hidden></div>
+        </section>
+
+        <section class="card" data-chart="age">
+            <div class="card-head">
+                <div><h2>File age</h2><p class="card-sub">Time since each file was last modified.</p></div>
+                <button type="button" class="link-btn table-toggle">Show table</button>
+            </div>
+            <div class="chart-box"><canvas id="ageChart" aria-label="Captures per file age band"></canvas></div>
+            <div class="table-view" hidden></div>
+        </section>
+
+        <section class="card card-wide">
+            <div class="card-head">
+                <div><h2>Where the captures are</h2><p class="card-sub">Folders under the scanned directory, and file types.</p></div>
+            </div>
+            <div class="fs-grid">
+                <div>
+                    <h3>Folders</h3>
+                    <div id="directoryTree" class="tree"></div>
+                </div>
+                <div>
+                    <h3>File types</h3>
+                    <table class="mini-table"><tbody id="extensionTable"></tbody></table>
+                </div>
+            </div>
+        </section>
+    </main>
+</div>
+
+<script src="/config.js"></script>
+<script type="module" src="/dashboard/dashboard-script.js?v=20261103b"></script>
 </body>
+
+</html>

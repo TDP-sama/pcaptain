@@ -118,7 +118,7 @@ void Scanner::handle_packet(const pcap_pkthdr* hdr,
     switch (dlt) {
         // DLT_EN10MB is Ethernet (10 Megabit)
         case DLT_EN10MB: {
-            if (hdr->caplen < sizeof(ether_header)) return;
+            if (hdr->caplen < sizeof(ether_header)) break;
 
             path.add("eth");
 
@@ -146,8 +146,12 @@ void Scanner::handle_packet(const pcap_pkthdr* hdr,
         }
     }
 
-    // Output the protocol chain (e.g., "eth:ip:tcp:http")
+    // Output the protocol chain (e.g., "eth:ip:tcp:http"). Packets we cannot
+    // parse still get an empty line, so the line count is the packet count and
+    // the backend does not need a second pass with capinfos.
     if (!path.empty()) {
         path.write_to(_sink);
+    } else {
+        _sink.write("\n", 1);
     }
 }

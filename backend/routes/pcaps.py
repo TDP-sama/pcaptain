@@ -53,7 +53,9 @@ async def download_pcap_by_hash(
     temp_filename = f"filtered_df_{uuid.uuid4()}.pcap"
     temp_filepath = f"/tmp/{temp_filename}"
 
-    cmd = ["tshark", "-r", abs_path, "-Y", filter, "-w", temp_filepath]
+    # Kept for old links; the UI now uses POST /exports (background job + cache).
+    cmd = ["tshark", "-n", "-r", abs_path, "-Y", filter, "-w", temp_filepath,
+           "-M", str(context.config.pcap.tshark_session_reset or 500000)]
     logger.info(f"Starting display-filter export: {' '.join(cmd)}")
 
     try:
@@ -122,7 +124,8 @@ async def download_filtered_pcap(
     temp_filename = f"filtered_{protocol}_{uuid.uuid4()}.pcap"
     temp_filepath = f"/tmp/{temp_filename}"
 
-    cmd = ["tshark", "-r", original_path, "-Y", protocol, "-w", temp_filepath]
+    cmd = ["tshark", "-n", "-r", original_path, "-Y", protocol, "-w", temp_filepath,
+           "-M", str(context.config.pcap.tshark_session_reset or 500000)]
 
     logger.info(f"Starting filtered export: {' '.join(cmd)}")
 

@@ -45,6 +45,18 @@ if [ -n "$SCAN_MODE" ]; then
   yq -i '.pcap.scan_mode = env(SCAN_MODE)' "$CONFIG_FILE"
 fi
 
+if [ -n "$MAX_PARALLEL_SCANS" ]; then
+  yq -i '.pcap.max_parallel_scans = env(MAX_PARALLEL_SCANS)' "$CONFIG_FILE"
+fi
+
+if [ -n "$LARGE_FILE_SIZE" ]; then
+  yq -i '.pcap.large_file_size = strenv(LARGE_FILE_SIZE)' "$CONFIG_FILE"
+fi
+
+if [ -n "$TSHARK_SESSION_RESET" ]; then
+  yq -i '.pcap.tshark_session_reset = env(TSHARK_SESSION_RESET)' "$CONFIG_FILE"
+fi
+
 # Quick scan (tshark sampling) settings
 
 if [ -n "$QUICK_SCAN_PEBC" ]; then

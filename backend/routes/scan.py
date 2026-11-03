@@ -1,5 +1,6 @@
 from fastapi import APIRouter
-from services.config import ScanMode
+from pydantic import BaseModel
+from services.config import ScanMode, save_scan_mode
 from services.context import get_app_context, AppContext
 from typing import Optional, List
 from fastapi import Depends, Query, Request, HTTPException
@@ -128,6 +129,29 @@ async def scan_config(*, context: AppContext = Depends(get_app_context)):
         "min_file_size": pcap_config.quick_scan.min_file_size if pcap_config.scan_mode == ScanMode.QUICK else None,
         "config_version": pcap_config.quick_scan.config_version,
     }
+
+class ScanConfigUpdate(BaseModel):
+    scan_mode: ScanMode
+
+
+@router.put("/scan-config", summary="Change the scan mode used by the next scan")
+async def update_scan_config(
+    body: ScanConfigUpdate,
+    context: AppContext = Depends(get_app_context),
+):
+    scan_service = get_scan_service()
+    if scan_service.scan_status["state"] == ScanState.RUNNING:
+        raise HTTPException(status_code=409, detail="A scan is running. Change the mode after it finishes.")
+
+    previous = context.config.pcap.scan_mode
+    context.config.pcap.scan_mode = body.scan_mode
+    persisted = await asyncio.to_thread(save_scan_mode, body.scan_mode)
+    if not persisted:
+        logger.warning("Scan mode changed to %s for this run only; config.yaml was not updated", body.scan_mode.value)
+    logger.info("Scan mode changed from %s to %s", previous.value, body.scan_mode.value)
+
+    return {**(await scan_config(context=context)), "persisted": persisted}
+
 
 @router.post(
     "/reindex/{folder_name}", summary="Reindex a specific folder under PCAP directories"

@@ -4,132 +4,185 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="search-style.css">
-    <link rel="stylesheet" href="toast-style.css">
-    <link rel="stylesheet" href="config-modal-style.css">
-    <link rel="stylesheet" href="info-modal-style.css">
+    <title>pcaptain</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
-    <title>PCAP Searching</title>
-    <!-- Axios CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <link rel="stylesheet" href="/base.css?v=20261103b">
+    <link rel="stylesheet" href="/search-style.css?v=20261103b">
+    <link rel="stylesheet" href="toast-style.css">
+    <link rel="stylesheet" href="info-modal-style.css">
+    <!-- info-modal.js still uses axios -->
+    <script src="https://cdn.jsdelivr.net/npm/axios@1.7.9/dist/axios.min.js"></script>
     <script>
-        Promise.all([
-            fetch('info-modal.html').then(r => r.text())
-        ])
-        .then(([infoHtml]) => {
-            const container = document.querySelector('.container');
-            container.insertAdjacentHTML('beforeend', infoHtml);
-            document.dispatchEvent(new Event("dynamic-dom-ready"));
-        })
-        .catch(err => {
-            console.error('Failed to load dynamic fragments', err);
-        });
+        fetch('info-modal.html')
+            .then(r => r.text())
+            .then(html => {
+                document.querySelector('.app').insertAdjacentHTML('beforeend', html);
+                document.dispatchEvent(new Event("dynamic-dom-ready"));
+            })
+            .catch(err => console.error('Failed to load info modal', err));
     </script>
 </head>
 
 <body>
-    <div class="container">
-        <h1>PCAPTAIN TOOL</h1>
-        <div class="search-box">
-            <input id="searchInput" type="text" placeholder="Search filename or protocol (e.g. eth !sip)" required autocomplete="off" />
-            <div id="suggestionBox" class="suggestion-box hidden"></div>
-            <button id="searchBtn">Search</button>
-            <div id="spinnerSearchBtn" class="spinner-search-hidden"></div>
-            <button id="scanBtn">Scan</button>
-            <div id="spinnerScanBtn" class="spinner-scan-hidden"></div>
-            <button id="cancelScanBtn" class="danger-btn">Cancel Scan</button>
-            <button id="dashboardBtn" onclick="location.href='/dashboard'" class="dashboard-btn" title="Go to Dashboard">
-                <i class="fa fa-bar-chart"></i>
+<div class="app">
+    <header class="topbar">
+        <div class="topbar-left">
+            <div class="brand">
+                <span class="brand-name">pcaptain</span>
+                <span class="brand-sub">capture catalog</span>
+            </div>
+            <nav class="page-nav" aria-label="Pages">
+                <a href="/" aria-current="page"><i class="fa fa-search" aria-hidden="true"></i> Search</a>
+                <a href="/dashboard/?v=20261103b"><i class="fa fa-bar-chart" aria-hidden="true"></i> Dashboard</a>
+            </nav>
+        </div>
+        <div class="topbar-actions">
+            <span id="serverStatus" class="status-pill" data-state="checking">Checking server</span>
+            <div class="scan-group">
+                <label for="scanModeSelect" class="sr-only">Scan mode</label>
+                <select id="scanModeSelect" class="mode-select" title="Scan mode used by the next scan">
+                    <option value="fast">Fast · ports only</option>
+                    <option value="quick">Quick · first part of each file</option>
+                    <option value="full">Full · tshark decodes everything</option>
+                </select>
+                <button id="scanBtn" class="btn btn-secondary" type="button">
+                    <i class="fa fa-refresh" aria-hidden="true"></i> <span>Scan</span>
+                </button>
+            </div>
+            <button id="cancelScanBtn" class="btn btn-danger" type="button" hidden>Cancel scan</button>
+        </div>
+    </header>
+
+    <section class="query-panel" aria-label="Search">
+        <form id="queryForm" class="query-bar" autocomplete="off">
+            <div id="chipList" class="chip-list" aria-label="Search terms"></div>
+            <input id="queryInput" type="text" spellcheck="false"
+                   placeholder="Add a protocol or filename, e.g. sip"
+                   aria-label="Add a protocol or filename"
+                   role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="suggestList">
+            <button id="clearQueryBtn" class="icon-btn" type="button" title="Clear search" hidden>
+                <i class="fa fa-times" aria-hidden="true"></i>
             </button>
-            <!-- Remove because no use case -->
-            <!-- <button id="configBtn" class="config-btn" title="Settings">
-                <i class="fa fa-cog"></i>
-            </button> -->
-            <div class="scan-config-tooltip" id="scanConfigTooltip">
-                <i class="fa fa-info-circle" aria-hidden="true"></i>
-                <div class="scan-config-tooltip-content" id="scanConfigTooltipContent">
-                    Loading scan config...
+            <button class="btn btn-primary" type="submit">Search</button>
+            <ul id="suggestList" class="suggest-list" role="listbox" hidden></ul>
+        </form>
+        <div class="query-help">
+            <span class="help-label">Syntax</span>
+            <button type="button" class="example" data-q="sip rtp"><code>sip rtp</code> both</button>
+            <button type="button" class="example" data-q="isup|bicc"><code>isup|bicc</code> either</button>
+            <button type="button" class="example" data-q="sip !rtp"><code>!rtp</code> without</button>
+            <button type="button" class="example" data-q="name:camel"><code>name:camel</code> filename</button>
+            <span class="help-tip">Click a term to switch between <b>has</b> and <b>has not</b>.</span>
+        </div>
+    </section>
+
+    <div class="workspace">
+        <aside class="facets" id="facets" aria-label="Refine by protocol">
+            <!-- shown only on narrow screens, where the panel collapses -->
+            <button id="facetToggle" class="facets-toggle" type="button" aria-expanded="false" aria-controls="facetBody">
+                <span>Refine by protocol <span id="facetTotal" class="facet-total"></span></span>
+                <i class="fa fa-chevron-down" aria-hidden="true"></i>
+            </button>
+            <div id="facetBody" class="facets-body">
+                <div class="facets-head">
+                    <h2>Refine</h2>
+                    <input id="facetFilter" type="search" placeholder="Filter protocols" aria-label="Filter protocols">
+                </div>
+                <p class="facets-note">Protocols in the current results. <b>+</b> require, <b>−</b> exclude.</p>
+                <ul id="facetList" class="facet-list"></ul>
+                <button id="facetMore" class="link-btn" type="button" hidden>Show all</button>
+            </div>
+        </aside>
+
+        <main class="results" aria-live="polite">
+            <div class="results-head">
+                <p id="resultSummary" class="summary">Loading catalog…</p>
+                <div class="sort-controls">
+                    <label for="sortBy">Sort</label>
+                    <select id="sortBy">
+                        <option value="filename">Name</option>
+                        <option value="size_bytes">Size</option>
+                        <option value="protocol_packet_count">Packets</option>
+                        <option value="path">Path</option>
+                    </select>
+                    <select id="sortOrder" aria-label="Sort order">
+                        <option value="false">Ascending</option>
+                        <option value="true">Descending</option>
+                    </select>
+                    <label for="limitSelect">Show</label>
+                    <select id="limitSelect">
+                        <option value="10" selected>10</option>
+                        <option value="25">25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
                 </div>
             </div>
-        </div>
 
-        <!-- Status signal -->
-        <div class="status-signal"></div>
-
-        <!-- Control setting for sorting and pagination -->
-        <div class="controls-container">
-            <div class="control-group">
-                <label for="sortBy">Sort by:</label>
-                <select id="sortBy" class="control-select">
-                    <option value="filename">Name</option>
-                    <option value="size_bytes">Size</option>
-                    <option value="protocol_packet_count">Packet Count</option>
-                </select>
-                
-                <select id="sortOrder" class="control-select">
-                    <option value="false">Ascending</option>
-                    <option value="true">Descending</option>
-                </select>
-
-                <label for="limitSelect">Show:</label>
-                <select id="limitSelect" class="control-select">
-                    <option value="5" selected>5</option>
-                    <option value="10">10</option>
-                    <option value="15">15</option>
-                    <option value="20">20</option>
-                    <option value="50">50</option>
-                </select>
+            <div class="table-scroll">
+                <table class="result-table">
+                    <thead>
+                        <tr>
+                            <th>Capture</th>
+                            <th>Protocols</th>
+                            <th class="num">Packets</th>
+                            <th class="num">Size</th>
+                            <th class="actions-col"><span class="sr-only">Actions</span></th>
+                        </tr>
+                    </thead>
+                    <tbody id="resultBody"></tbody>
+                </table>
             </div>
 
-            <!-- <div class="control-group">
-                <button id="prevBtn" class="pagination-btn" disabled>&lt; Prev</button>
-                <span id="pageInfo">Page 1</span>
-                <button id="nextBtn" class="pagination-btn" disabled>Next &gt;</button>
-            </div> -->
-        </div>
-
-        <div class="table-wrapper">
-            <table id="resultTable">
-                <thead>
-                    <tr>
-                        <th>Filename</th>
-                        <th class="thInfo">Info</th>
-                        <th class="thMode">Mode</th>
-                        <th>Path <i class="fa fa-copy copy-path-btn" id="copyAllPathsBtn" title="Copy all paths"></i></th>
-                        <th>Matched</th>
-                        <th>Size</th>
-                        <th>Packet</th>
-                        
-                    </tr>
-                </thead>
-                <tbody id="resultBody">
-                    <!-- Dynamic content -->
-                </tbody>
-            </table>
-        </div>
-
-        <!-- Pagination PCAP search results -->
-        <div id="paginationContainer" class="pagination-container">
-        </div>
-
-        <div id="scanModal" class="modal hidden">
-            <div class="modal-content">
-                <h2>Select an option</h2>
-                <div class="button-group">
-                    <button id="scanAllBtn" class="action-btn">All</button>
-                    <!-- <button id="chooseDirBtn" class="action-btn">Choose Directory</button> -->
-                    <input type="file" id="directoryPicker" webkitdirectory multiple hidden>
-                </div>
-                <button id="closeModalBtn" class="close-btn">Close</button>
-            </div>
-        </div>
-
+            <div id="emptyState" class="empty-state" hidden></div>
+            <nav id="pagination" class="pagination" aria-label="Pages"></nav>
+        </main>
     </div>
 
-    <script src="config.js"></script>
-    <script type="module" src="constant.js"></script>
-    <script type="module" src="toast-script.js"></script>
-    <script type="module" src="search-script.js"></script>
+    <dialog id="exportDialog" class="export-dialog" aria-labelledby="exportTitle">
+        <div class="export-head">
+            <div>
+                <h2 id="exportTitle">Export matching packets</h2>
+                <p id="exportFile" class="export-file"></p>
+            </div>
+            <button type="button" id="exportClose" class="icon-btn" aria-label="Close">
+                <i class="fa fa-times" aria-hidden="true"></i>
+            </button>
+        </div>
+
+        <label for="exportFilter" class="field-label">Wireshark display filter</label>
+        <textarea id="exportFilter" rows="3" spellcheck="false" autocomplete="off"
+                  placeholder='e.g. sip.Method == "INVITE" &amp;&amp; ip.addr == 10.0.0.1'></textarea>
+        <p id="filterStatus" class="filter-status" role="status"></p>
+
+        <div class="presets" aria-label="Filter presets">
+            <span class="presets-label">Presets</span>
+            <div id="presetList" class="preset-list"></div>
+        </div>
+        <p class="export-hint">
+            Any <a href="https://www.wireshark.org/docs/dfref/" target="_blank" rel="noopener">Wireshark display filter</a> works.
+            Large captures take minutes; the result is cached, so the same export is instant next time.
+        </p>
+
+        <div id="exportProgress" class="export-progress" hidden>
+            <div class="progress-track"><span id="exportBar"></span></div>
+            <p id="exportProgressText" class="progress-text" role="status"></p>
+        </div>
+
+        <div class="export-actions">
+            <button type="button" id="exportCancel" class="btn btn-ghost">Close</button>
+            <a id="exportDownload" class="btn btn-primary" hidden download>
+                <i class="fa fa-download" aria-hidden="true"></i> Download
+            </a>
+            <button type="button" id="exportStart" class="btn btn-primary">Export</button>
+        </div>
+    </dialog>
+</div>
+
+<script src="config.js"></script>
+<script type="module" src="/search-script.js?v=20261103b"></script>
 </body>
 
 </html>

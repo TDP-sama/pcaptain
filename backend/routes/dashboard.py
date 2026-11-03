@@ -117,6 +117,8 @@ async def build_dashboard_summary(context: AppContext):
         rate_dist = defaultdict(int)
         scan_mode_dist = defaultdict(int)
         total_files = 0
+        total_bytes = 0
+        total_packets = 0
         combo_dist = defaultdict(int)
 
         TOP_COMBO_LIMIT = 10
@@ -137,12 +139,14 @@ async def build_dashboard_summary(context: AppContext):
 
                 size_bytes = int(data.get("size_bytes", 0))
                 packet_count = int(data.get("total_packets", 0))
-                protocols = data.get("protocols", "").split(',')
+                protocols = [p for p in data.get("protocols", "").split(',') if p]
                 last_modified = float(data.get("last_modified", now))
                 file_path = data.get("path", "")
                 scan_mode = data.get("scan_mode", "full").lower()
 
                 total_files += 1
+                total_bytes += size_bytes
+                total_packets += packet_count
 
                 # Scan mode distribution
                 scan_mode_dist[scan_mode] += 1
@@ -217,6 +221,9 @@ async def build_dashboard_summary(context: AppContext):
         summary = {
             "generated_at": now,
             "total_files": total_files,
+            "total_bytes": total_bytes,
+            "total_packets": total_packets,
+            "distinct_protocols": len([p for p in protocol_presence if p]),
             "scan_mode_distribution": dict(scan_mode_dist),
             "pcap_size_distribution": dict(size_dist),
             "packet_count_distribution": dict(packet_dist),

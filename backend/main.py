@@ -25,6 +25,7 @@ from routes.protocols import router as protocols_router
 from routes.pcaps import router as pcaps_router
 from routes.search import router as search_router
 from routes.dashboard import router as dashboard_router
+from routes.exports import router as exports_router
 
 config = load_config()
 setup_logging(config.log.level)
@@ -73,13 +74,17 @@ async def lifespan(app: FastAPI):
     async def check_redis_for_pcaps():
         if not redis_client:
             raise redis.exceptions.ConnectionError("Redis client not initialized.")
-        return await asyncio.to_thread(redis_client.keys, "pcap:file:*")
+        # Only need to know whether anything is indexed: one SCAN step, not a
+        # blocking KEYS over the whole catalog.
+        return await asyncio.to_thread(
+            lambda: next(redis_client.scan_iter("pcap:file:*", count=1000), None)
+        )
 
     if redis_client:
         try:
-            existing_pcap_keys = await check_redis_for_pcaps()
+            existing_pcap_key = await check_redis_for_pcaps()
 
-            if not existing_pcap_keys:
+            if not existing_pcap_key:
                 logger.info("No indexed pcaps found in Redis. Starting initial scan...")
                 loop = asyncio.get_running_loop()
                 loop.run_in_executor(
@@ -89,9 +94,7 @@ async def lifespan(app: FastAPI):
                     ),
                 )
             else:
-                logger.info(
-                    f"Found {len(existing_pcap_keys)} indexed pcaps in Redis. Skipping initial scan."
-                )
+                logger.info("Found indexed pcaps in Redis. Skipping initial scan.")
         except Exception as e:
             logger.error(f"Startup Redis check failed: {e}")
     else:
@@ -119,6 +122,7 @@ app.include_router(protocols_router)
 app.include_router(pcaps_router)
 app.include_router(search_router)
 app.include_router(dashboard_router)
+app.include_router(exports_router)
 
 app.add_middleware(
     CORSMiddleware,

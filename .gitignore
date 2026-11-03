@@ -5,3 +5,5 @@ pcaps/
 .env
 
 AGENTS.md
+# Python bytecode
+__pycache__/

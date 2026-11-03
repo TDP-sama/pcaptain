@@ -2,13 +2,37 @@ from fastapi import APIRouter, Depends
 
 from services.context import get_app_context, AppContext
 import asyncio
-from services.scan import AUTOCOMPLETE_KEY, SORT_INDEX_FILENAME, PCAP_FILE_KEY_PREFIX, get_all_protocols
+from services.scan import (
+    AUTOCOMPLETE_KEY,
+    SORT_INDEX_FILENAME,
+    PCAP_FILE_KEY_PREFIX,
+    PROTOCOCOL_INDEX_PREFIX,
+    get_all_protocols,
+)
 from services.logger import get_logger
 from fastapi import Query, HTTPException
 from utils.protocols_utils import rank_protocols
 
 router = APIRouter(tags=["Protocols"])
 logger = get_logger(__name__)
+
+
+@router.get("/protocols", summary="Every known protocol with the number of files containing it")
+async def list_protocols(context: AppContext = Depends(get_app_context)):
+    redis = context.redis_client
+    if not redis:
+        raise HTTPException(status_code=503, detail="Service unavailable: Redis connection failed.")
+
+    protocols = sorted(await get_all_protocols(redis))
+    pipe = redis.pipeline()
+    for p in protocols:
+        pipe.scard(f"{PROTOCOCOL_INDEX_PREFIX}:{p.lower()}")
+    counts = await asyncio.to_thread(pipe.execute)
+    return [
+        {"protocol": p, "files": n}
+        for p, n in zip(protocols, counts)
+        if n > 0
+    ]
 
 
 @router.get("/protocols/suggest", summary="Get protocol name suggestions for autocomplete")
