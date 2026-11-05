@@ -176,10 +176,15 @@ def should_rescan_file(
     return False
 
 
+# 1 MiB reads: with 4 KiB reads the Python loop, not SHA256, was the limit
+# (265 vs 538 MB/s measured on a 1.2 GB capture inside the container).
+HASH_CHUNK_BYTES = 1 << 20
+
+
 def calculate_sha256_sync(file_path: str) -> str:
     sha256_hash = hashlib.sha256()
     with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
+        for byte_block in iter(lambda: f.read(HASH_CHUNK_BYTES), b""):
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 

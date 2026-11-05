@@ -44,6 +44,7 @@ export {
 
 
 export const SCAN_MODE_TEXT = {
+    "full": "Full",
     "normal": "Normal",
     "quick": "Quick",
     "fast": "Fast"

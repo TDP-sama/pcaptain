@@ -1,182 +1,72 @@
-/* --- Info Modal Styling (extracted) --- */
-#infoModal {
-    position: absolute; 
-    z-index: 1000;
-    width: 400px;
-    height: auto;
-    min-height: 400px;
-    max-height: 80vh; 
-    background-color: #fff;
-    border-radius: 8px;
-    box-shadow: 0 5px 20px rgba(0,0,0,0.2);
-    border: 1px solid #dcdcdc;
-    display: none; 
-    overflow-y: auto;
+/* Capture details: a drawer docked to the right edge, full height, so it always fits
+   the viewport (it used to be placed beside the button and ran off-screen).
+   Full width on phones. Tokens come from base.css. */
+.info-backdrop {
+    position: fixed; inset: 0; z-index: 999; background: rgba(20, 33, 48, 0.28);
 }
+.info-drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 1000;
+    width: min(480px, 100vw); display: flex; flex-direction: column;
+    background: var(--surface); color: var(--ink);
+    border-left: 1px solid var(--line-strong); box-shadow: -12px 0 40px rgba(20, 33, 48, 0.18);
+    animation: drawerIn 0.18s ease-out;
+}
+@keyframes drawerIn { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
 
-#infoModal.show {
-    display: block;
-    animation: fadeIn 0.2s ease-out;
+.info-head {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+    padding: 18px 20px 14px; border-bottom: 1px solid var(--line);
 }
+.info-head-text { min-width: 0; }
+.info-kicker { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.info-head h2 { margin: 2px 0 0; font-size: 17px; font-weight: 600; word-break: break-all; }
 
-.info-modal-content {
-    padding: 0;
-    background: transparent;
-    box-shadow: none; 
-    border: none;
-    width: 100%;
-}
-
-.modal-header {
-    background-color: #fff; 
-    padding: 8px 15px;
-    border-bottom: 1px solid #e0e0e0;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-.modal-header h2 {
-    font-size: 16px;
-    margin: 0;
-    color: #0060A9;
-}
-
-.modal-body {
-    padding: 15px;
-    font-size: 13px; 
-    color: #333;
-}
-
-.info-row {
-    margin-bottom: 15px;
-    word-break: break-all; 
-}
-
-.info-divider {
-    border: 0;
-    border-top: 1px solid #eee;
-    margin: 10px 0;
-}
+/* flex column, children never shrink: as a grid, the details block was squeezed
+   (and clipped by its own overflow:hidden) when the protocol table was long */
+.info-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 20px 24px; display: flex; flex-direction: column; gap: 18px; }
+.info-body > * { flex-shrink: 0; }
+.info-label { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 4px; }
+.info-path { display: flex; align-items: flex-start; gap: 4px; font-family: var(--font-mono); font-size: 12.5px; word-break: break-all; }
 
 .info-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    background: #fafafa;
-    padding: 8px;
-    border-radius: 4px;
-    margin-bottom: 10px;
+    margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px;
+    background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
 }
+.info-grid > div { background: var(--surface); padding: 10px 12px; }
+.info-grid dt { font-size: 11.5px; color: var(--muted); }
+.info-grid dd { margin: 2px 0 0; font-weight: 500; font-variant-numeric: tabular-nums; }
 
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(-5px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-.protocol-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 10px;
-}
-
-.protocol-header strong {
-    margin-right: 10px;
-}
-
+.protocol-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
+.protocol-header .info-label { margin: 0; }
 #protocolSearchInput {
-    padding: 5px 10px;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    font-size: 12px;
-    width: 150px;
-    transition: border-color 0.2s;
+    width: 160px; padding: 5px 8px; font-size: 12.5px;
+    border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface);
 }
-
-#protocolSearchInput:focus {
-    outline: none;
-    border-color: #0060A9;
-}
-
-.protocol-table-wrapper {
-    margin-top: 10px;
-    overflow-x: auto;
-}
-
-.protocol-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-    font-family: 'Courier New', Courier, monospace;
-}
-
-.protocol-table thead {
-    background-color: #f5f5f5;
-}
-
+.protocol-table-wrapper { border: 1px solid var(--line); border-radius: 8px; overflow: auto; }
+.protocol-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .protocol-table th {
-    padding: 8px;
-    text-align: left;
-    border-bottom: 2px solid #ddd;
-    font-weight: bold;
-    white-space: nowrap;
+    position: sticky; top: 0; background: #f8fafc; text-align: left; white-space: nowrap;
+    padding: 8px 10px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); border-bottom: 1px solid var(--line);
 }
-
-.protocol-table th.sortable {
-    cursor: pointer;
-    user-select: none;
-    transition: background-color 0.2s;
-}
-
-.protocol-table th.sortable:hover {
-    background-color: #e8e8e8;
-}
-
-.protocol-table th.sortable i {
-    margin-left: 5px;
-    color: #666;
-    font-size: 11px;
-}
-
-.protocol-table th:last-child {
-    text-align: center;
-}
-
-.protocol-table td {
-    padding: 8px;
-    border-bottom: 1px solid #eee;
-}
-
-.protocol-table td:last-child {
-    text-align: center;
-}
-
-.protocol-table tbody tr:hover {
-    background-color: #f9f9f9;
-}
-
+.protocol-table th.sortable { cursor: pointer; user-select: none; }
+.protocol-table th.sortable:hover { color: var(--brand); }
+.protocol-table th i { margin-left: 3px; font-size: 10px; }
+.protocol-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.protocol-table tbody tr:last-child td { border-bottom: 0; }
+.protocol-table tbody tr:hover { background: var(--bg); }
+.protocol-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.protocol-table td:first-child { font-family: var(--font-mono); }
+.protocol-table td:last-child { text-align: right; width: 1%; }
 .download-protocol-btn {
-    background: none;
-    border: 1px solid #0060A9;
-    color: #0060A9;
-    cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 4px;
-    transition: all 0.2s;
-    font-size: 12px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--brand);
+    padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;
 }
+.download-protocol-btn:hover { border-color: var(--brand); background: var(--brand-soft); }
 
-.download-protocol-btn:hover {
-    background-color: #0060A9;
-    color: white;
+@media (max-width: 560px) {
+    .info-drawer { border-left: 0; }
+    .info-head, .info-body { padding-left: 16px; padding-right: 16px; }
+    #protocolSearchInput { width: 130px; }
 }
-
-.download-protocol-btn i {
-    pointer-events: none;
-}
-
-/* Mobile Fix for the new Column */
-@media (max-width: 600px) {
-    .info-btn { margin: 0; }
-}
+@media (prefers-reduced-motion: reduce) { .info-drawer { animation: none; } }

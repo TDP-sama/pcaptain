@@ -7,18 +7,43 @@ export function formatDate(timestamp) {
     return date.toLocaleString();
 }
 
-window.addEventListener("click", (e) => {
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// The drawer is docked to the right edge (see info-modal-style.css), so it
+// always fits the screen. It closes on its X, a click on the backdrop, or Esc,
+// and gives focus back to the button that opened it.
+let currentFile = null;
+let opener = null;
+
+function closeInfoModal() {
     const modal = document.getElementById("infoModal");
-    if (!modal) return;
-    if (modal.classList.contains("show") && !modal.contains(e.target)) {
-        modal.classList.remove("show");
+    if (!modal || modal.hidden) return;
+    modal.hidden = true;
+    document.getElementById("infoBackdrop").hidden = true;
+    if (opener) opener.focus();
+}
+
+document.addEventListener("click", (e) => {
+    if (e.target.closest("#infoClose") || e.target.id === "infoBackdrop") closeInfoModal();
+    if (e.target.closest("#infoCopyPath") && currentFile) {
+        navigator.clipboard.writeText(currentFile.path || "")
+            .then(() => showToast(TOAST_STATUS.SUCCESS, "Path copied"))
+            .catch(() => showToast(TOAST_STATUS.ERROR, "Could not copy the path"));
     }
+});
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeInfoModal();
 });
 
 export function openInfoModal(file, event) {
     const modal = document.getElementById("infoModal");
-    const btn = event.currentTarget;
     if (!modal) return;
+    currentFile = file;
+    opener = event?.currentTarget || null;
 
     document.getElementById("infoFilename").innerText = file.filename || "N/A";
     document.getElementById("infoPath").innerText = file.path || "N/A";
@@ -57,15 +82,9 @@ export function openInfoModal(file, event) {
 
     renderProtocolTable(file);
 
-    const rect = event.currentTarget.getBoundingClientRect();
-    const scrollTop = window.scrollY || document.documentElement.scrollTop;
-    const scrollLeft = window.scrollX || document.documentElement.scrollLeft;
-    modal.classList.remove("hidden");
-    modal.classList.add("show");
-    let left = (rect.right + scrollLeft) + 10;
-    let top = (rect.top + scrollTop) - 20;
-    modal.style.left = `${left}px`;
-    modal.style.top = `${top}px`;
+    document.getElementById("infoBackdrop").hidden = false;
+    modal.hidden = false;
+    document.getElementById("infoClose").focus();
 }
 
 let currentProtocolData = [];
@@ -136,12 +155,13 @@ function renderTableRows(file) {
     currentProtocolData.forEach(data => {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-            <td>${data.protocol.toUpperCase()}</td>
-            <td>${data.percent.toFixed(2)}</td>
-            <td>${data.count}</td>
+            <td>${escapeHtml(data.protocol)}</td>
+            <td class="num">${data.percent.toFixed(2)}</td>
+            <td class="num">${Number(data.count).toLocaleString()}</td>
             <td>
-                <button class="download-protocol-btn" data-protocol="${data.protocol}" title="Download ${data.protocol.toUpperCase()} packets">
-                    <i class="fa fa-download"></i>
+                <button type="button" class="download-protocol-btn" data-protocol="${escapeHtml(data.protocol)}"
+                        title="${escapeHtml(`Export only the ${data.protocol} packets`)}">
+                    <i class="fa fa-filter" aria-hidden="true"></i> Export
                 </button>
             </td>
         `;
@@ -150,10 +170,13 @@ function renderTableRows(file) {
         const downloadBtn = tr.querySelector(".download-protocol-btn");
         downloadBtn.addEventListener("click", (e) => {
             e.stopPropagation();
-            const protocol = downloadBtn.getAttribute("data-protocol");
-            showToast(TOAST_STATUS.INFO, `Preparing download for ${protocol.toUpperCase()}...`);
-            const downloadUrl = `${file.download_url}/filter?protocol=${protocol}`;
-            window.location.href = downloadUrl;
+            // Hand over to the export dialog (background job + cache) instead of
+            // the old synchronous /filter download, which held the request for
+            // minutes on large captures.
+            closeInfoModal();
+            document.dispatchEvent(new CustomEvent("pcap-export", {
+                detail: { file, filter: downloadBtn.getAttribute("data-protocol") },
+            }));
         });
     });
 }

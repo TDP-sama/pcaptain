@@ -1,72 +1,54 @@
-<div id="infoModal" class="modal hidden">
-    <div class="modal-content info-modal-content">
-        <div class="modal-body">
-            <div class="info-row">
-                <strong>Filename:</strong> <span id="infoFilename"></span>
-            </div>
-            <div class="info-row">
-                <strong>Full Path:</strong> <span id="infoPath"></span>
-            </div>
-            
-            <hr class="info-divider">
-
-            <div class="info-row">
-                <strong>Size:</strong> <span id="infoSize"></span>
-            </div>
-            <div class="info-row">
-                <strong>Total Packet Count:</strong>  <span id="infoPackets"></span>
-            </div>
-            <div class="info-row">
-                <strong>Last Modified:</strong> <span id="infoModified"></span>
-            </div>
-            <div class="info-row">
-                <strong>Last Scanned:</strong> <span id="infoScanned"></span>
-            </div>
-            <div class="info-row">
-                <strong>Packets Scanned:</strong>  <span id="infoPacketsScanned"></span>
-            </div>
-
-            <hr class="info-divider">
-
-            <div class="info-row">
-                <strong>Scan Mode:</strong> <span id="infoScanMode"></span>
-            </div>
-            <div class="info-row" id="infoScanPebcRow">
-                <strong>PEBC:</strong> <span id="infoScanPebc"></span>
-            </div>
-            <div class="info-row" id="infoScanConfigVersionRow">
-                <strong>Config Version:</strong> <span id="infoScanConfigVersion"></span>
-            </div>
-
-            <hr class="info-divider">
-
-            <div class="info-row">
-                <div class="protocol-header">
-                    <strong>Protocols Found:</strong>
-                    <input type="text" id="protocolSearchInput" placeholder="Search protocols..." />
-                </div>
-                <div class="protocol-table-wrapper">
-                    <table id="protocolTable" class="protocol-table">
-                        <thead>
-                            <tr>
-                                <th class="sortable" data-sort="protocol" title="Click to sort by protocol">
-                                    Protocol <i class="fa fa-sort"></i>
-                                </th>
-                                <th class="sortable" data-sort="percent" title="Click to sort by percent">
-                                    Percent (%) <i class="fa fa-sort"></i>
-                                </th>
-                                <th class="sortable" data-sort="count" title="Click to sort by count">
-                                    Count <i class="fa fa-sort"></i>
-                                </th>
-                                <th>Download</th>
-                            </tr>
-                        </thead>
-                        <tbody id="protocolTableBody">
-                            <!-- Dynamic content -->
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+<div id="infoBackdrop" class="info-backdrop" hidden></div>
+<aside id="infoModal" class="info-drawer" role="dialog" aria-modal="true" aria-labelledby="infoTitle" hidden>
+    <header class="info-head">
+        <div class="info-head-text">
+            <span class="info-kicker">Capture details</span>
+            <h2 id="infoTitle"><span id="infoFilename"></span></h2>
         </div>
+        <button type="button" id="infoClose" class="icon-btn" aria-label="Close details">
+            <i class="fa fa-times" aria-hidden="true"></i>
+        </button>
+    </header>
+
+    <div class="info-body">
+        <section class="info-section">
+            <div class="info-label">Full path</div>
+            <div class="info-path"><span id="infoPath"></span>
+                <button type="button" id="infoCopyPath" class="icon-btn" title="Copy path" aria-label="Copy path">
+                    <i class="fa fa-clone" aria-hidden="true"></i>
+                </button>
+            </div>
+        </section>
+
+        <dl class="info-grid">
+            <div><dt>Size</dt><dd id="infoSize"></dd></div>
+            <div><dt>Total packets</dt><dd id="infoPackets"></dd></div>
+            <div><dt>Packets scanned</dt><dd id="infoPacketsScanned"></dd></div>
+            <div><dt>Scan mode</dt><dd id="infoScanMode"></dd></div>
+            <div id="infoScanPebcRow"><dt>Quick scan share</dt><dd id="infoScanPebc"></dd></div>
+            <div id="infoScanConfigVersionRow"><dt>Config version</dt><dd id="infoScanConfigVersion"></dd></div>
+            <div><dt>Last modified</dt><dd id="infoModified"></dd></div>
+            <div><dt>Last scanned</dt><dd id="infoScanned"></dd></div>
+        </dl>
+
+        <section class="info-section">
+            <div class="protocol-header">
+                <div class="info-label">Protocols found</div>
+                <input type="search" id="protocolSearchInput" placeholder="Filter protocols" aria-label="Filter protocols">
+            </div>
+            <div class="protocol-table-wrapper">
+                <table id="protocolTable" class="protocol-table">
+                    <thead>
+                        <tr>
+                            <th class="sortable" data-sort="protocol" title="Sort by protocol">Protocol <i class="fa fa-sort" aria-hidden="true"></i></th>
+                            <th class="sortable num" data-sort="percent" title="Sort by share of packets">% <i class="fa fa-sort" aria-hidden="true"></i></th>
+                            <th class="sortable num" data-sort="count" title="Sort by packet count">Packets <i class="fa fa-sort" aria-hidden="true"></i></th>
+                            <th><span class="sr-only">Export</span></th>
+                        </tr>
+                    </thead>
+                    <tbody id="protocolTableBody"></tbody>
+                </table>
+            </div>
+        </section>
     </div>
-</div>
+</aside>

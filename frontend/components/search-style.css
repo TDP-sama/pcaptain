@@ -211,7 +211,6 @@
 /* ---------- Shared modal base (info popover) ---------- */
 .modal { position: fixed; inset: 0; display: flex; justify-content: center; align-items: center; z-index: 999; }
 .modal.hidden { display: none; }
-#infoModal { inset: auto; }
 .modal-content { background: var(--surface); padding: 2rem; border-radius: 12px; width: 320px; }
 
 @keyframes fadeIn {

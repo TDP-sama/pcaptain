@@ -753,6 +753,12 @@ $("exportStart").addEventListener("click", startExport);
 $("exportClose").addEventListener("click", closeExportDialog);
 $("exportCancel").addEventListener("click", closeExportDialog);
 $("exportDialog").addEventListener("cancel", () => clearInterval(exportState.timer));
+// "Export" next to a protocol in the details drawer (info-modal.js)
+document.addEventListener("pcap-export", (e) => {
+    openExportDialog(e.detail.file);
+    $("exportFilter").value = e.detail.filter;
+    onFilterInput();
+});
 
 // --- SORT / PAGE SIZE ---
 $("sortBy").addEventListener("change", (e) => { currentSortBy = e.target.value; currentPage = 1; fetchResults(); });
