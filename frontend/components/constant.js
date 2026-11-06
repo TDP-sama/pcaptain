@@ -30,7 +30,12 @@ const SERVER_HEALTH_CHECK_INTERVAL = 20000; // millisecond
 const CHECK_SCAN_FILES_STATUS_INTERVAL = 2000; // millisecond
 const MIN_QUERY_LENGTH = 1;
 
-const SERVER = new URL(window.APP_CONFIG.BE_BASE_URL).href;
+// API base. Default "/api/": the same server that serves this page, which
+// forwards to the backend (see frontend/config/nginx.conf). Resolved against
+// the page address, so the UI works under any host name. The trailing slash
+// matters: API paths are joined onto it.
+const configuredBase = (window.APP_CONFIG && window.APP_CONFIG.BE_BASE_URL) || "/api/";
+const SERVER = new URL(configuredBase.endsWith("/") ? configuredBase : `${configuredBase}/`, window.location.href).href;
 
 export {
     API_PATH,

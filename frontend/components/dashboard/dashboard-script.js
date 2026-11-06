@@ -84,9 +84,12 @@ async function checkHealth() {
     const pill = $("serverStatus");
     try {
         const res = await fetch(new URL(API_PATH.SERVER_HEALTH_CHECK_PATH, SERVER));
-        const ok = res.ok && (await res.json()).status === "OK";
-        pill.dataset.state = ok ? "ok" : "down";
-        pill.textContent = ok ? "Server online" : "Server error";
+        const body = res.ok ? await res.json() : {};
+        const [state, text] = body.status === "OK" ? ["ok", "Server online"]
+            : body.redis === "loading" ? ["scanning", "Catalog loading"]
+            : ["down", "Database offline"];
+        pill.dataset.state = state;
+        pill.textContent = text;
     } catch (_) {
         pill.dataset.state = "down";
         pill.textContent = "Server offline";
@@ -96,7 +99,7 @@ async function checkHealth() {
 // --- RENDER ---
 function render(d) {
     const updated = new Date(d.generated_at * 1000);
-    $("lastUpdated").textContent = `Updated ${updated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    $("lastUpdated").textContent = `Updated ${updated.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
     $("lastUpdated").title = updated.toLocaleString();
     $("refreshBtn").title = `Summary computed ${updated.toLocaleString()}. Click to recompute.`;
 

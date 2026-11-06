@@ -6,7 +6,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import routes.scan as scan_routes
 from conftest import requires_tshark, run_scan
 from routes.exports import router as exports_router
 from routes.protocols import router as protocols_router
@@ -82,11 +81,12 @@ def test_protocols_lists_file_counts(client):
 
 # --- scan config ---
 
-def test_change_scan_mode(client, ctx, monkeypatch):
-    monkeypatch.setattr(scan_routes, "save_scan_mode", lambda mode: True)   # never write the real config.yaml
+def test_change_scan_mode(client, ctx):
     res = client.put("/scan-config", json={"scan_mode": "quick"})
     assert res.status_code == 200 and res.json()["scan_mode"] == "quick"
     assert ctx.config.pcap.scan_mode == "quick"
+    # kept with the catalog in Redis, so it survives a restart without any config file
+    assert ctx.redis_client.hget("pcap:settings", "scan_mode") == "quick"
     assert client.put("/scan-config", json={"scan_mode": "turbo"}).status_code == 422
 
 
@@ -139,3 +139,52 @@ def test_export_rejects_bad_filter_and_unknown_file(client):
 def test_validate_endpoint(client):
     assert client.get("/exports/validate", params={"filter": "sip || dns"}).json() == {"valid": True, "error": None}
     assert client.get("/exports/validate", params={"filter": "sip =="}).json()["valid"] is False
+
+
+# --- downloads ---
+
+def download_client(ctx):
+    from routes.pcaps import router as pcaps_router
+    app = FastAPI()
+    app.include_router(pcaps_router)
+    return TestClient(app)
+
+
+def test_download_of_a_deleted_file_is_404_not_500(client, ctx, sample_pcaps):
+    h = file_hash(client, "dns")
+    downloads = download_client(ctx)
+    assert downloads.get(f"/pcaps/download/{h}").status_code == 200
+    sample_pcaps["dns"].unlink()
+    res = downloads.get(f"/pcaps/download/{h}")
+    assert res.status_code == 404 and "no longer on disk" in res.json()["detail"]
+
+
+def test_legacy_filter_download(client, ctx):
+    downloads = download_client(ctx)
+    h = file_hash(client, "mixed")
+    assert downloads.get(f"/pcaps/download/{h}", params={"filter": "sip"}).status_code == 200
+    # tshark writes a header even when nothing matches: that used to be a 200
+    assert downloads.get(f"/pcaps/download/{h}", params={"filter": "rtp"}).status_code == 404
+    assert downloads.get(f"/pcaps/download/{h}", params={"filter": "sip =="}).status_code == 400
+    assert downloads.get(f"/pcaps/download/{h}/filter", params={"protocol": "dns"}).status_code == 200
+    assert downloads.get(f"/pcaps/download/{h}/filter", params={"protocol": "rtp"}).status_code == 404
+
+
+def test_export_of_a_symlinked_capture(client, ctx, sample_pcaps, tmp_path):
+    outside = tmp_path / "elsewhere.pcap"
+    outside.write_bytes(sample_pcaps["sip"].read_bytes() + b"")  # same packets, outside the root
+    sample_pcaps["sip"].unlink()
+    sample_pcaps["sip"].symlink_to(outside)
+    h = file_hash(client, "sip")
+    job = client.post("/exports", json={"file_hash": h, "filter": "sip"})
+    assert job.status_code == 200
+
+
+def test_unknown_or_group_matches_nothing(client):
+    found, body = names(client, "foo|bar")
+    assert found == [] and body["total"] == 0
+
+
+def test_scan_status_has_progress_fields(client):
+    status = client.get("/scan-status").json()
+    assert {"state", "total_files", "processed_files", "current_files"} <= status.keys()

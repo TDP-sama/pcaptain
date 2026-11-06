@@ -9,6 +9,7 @@ from services.context import AppContext, get_app_context
 from services.export import JobState, download_name, get_export_service, normalize_filter
 from services.logger import get_logger
 from services.scan import PCAP_FILE_KEY_PREFIX
+from routes.pcaps import resolve_catalog_file
 
 router = APIRouter(tags=["Exports"])
 logger = get_logger(__name__)
@@ -42,10 +43,9 @@ async def create_export(body: ExportRequest, context: AppContext = Depends(get_a
     if not meta:
         raise HTTPException(404, "File not found in the catalog")
 
-    root = os.path.realpath(context.config.pcap.root_directory)
-    source = os.path.realpath(meta.get("path", ""))
-    if os.path.commonpath([root, source]) != root or not os.path.isfile(source):
-        raise HTTPException(404, "The capture is no longer available on disk")
+    # Same check as a plain download. The catalog path is normalised, not
+    # resolved, so a capture that is a symlink can be exported too.
+    source = await asyncio.to_thread(resolve_catalog_file, context, meta)
 
     service = get_export_service()
     display_filter = normalize_filter(body.filter)
@@ -85,6 +85,6 @@ async def download_export(job_id: str):
         raise HTTPException(404, "This export was removed from the cache. Start it again.")
     return FileResponse(
         path,
-        media_type="application/vnd.tcpdump.pcap",
+        media_type="application/x-pcapng",  # extracts are written as pcapng
         filename=download_name(job.source_name, job.filter),
     )

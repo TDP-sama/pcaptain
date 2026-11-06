@@ -57,6 +57,12 @@ function formatCount(value) {
     return Number.isFinite(n) ? n.toLocaleString() : "–";
 }
 
+// Links are built from the API base the page uses, not taken from the
+// download_url the backend stores: that one may point at another host.
+function apiUrl(path) {
+    return new URL(path, SERVER).href;
+}
+
 async function api(path, { method = "GET", params } = {}) {
     const url = new URL(path, SERVER);
     if (params) {
@@ -154,6 +160,8 @@ function renderChips() {
             label.addEventListener("click", () => {
                 t.neg = !t.neg;
                 runSearch();
+                // renderChips() rebuilt every chip: put focus back on this one
+                $("chipList").children[i]?.querySelector(".chip-label")?.focus();
             });
         }
 
@@ -420,7 +428,7 @@ function renderTable(files) {
             <td class="num" data-label="Packets">${formatCount(file.total_packets)}</td>
             <td class="num" data-label="Size">${formatFileSize(file.size_bytes)}</td>
             <td class="actions">
-                <a class="btn btn-small" href="${escapeHtml(file.download_url)}" download title="Download the whole capture">
+                <a class="btn btn-small" href="${escapeHtml(apiUrl(`pcaps/download/${file.hash}`))}" download title="Download the whole capture">
                     <i class="fa fa-download" aria-hidden="true"></i> File
                 </a>
                 <button type="button" class="btn btn-small btn-outline export-btn" data-index="${index}"
@@ -485,6 +493,7 @@ function renderFacets() {
             </span>`;
         li.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
             addTerms([{ kind: "proto", value: f.protocol, neg: b.dataset.act === "exclude" }]);
+            $("facetFilter").value = "";   // the term is in; show the whole list again
             runSearch();
         }));
         list.append(li);
@@ -511,13 +520,14 @@ $("facetMore").addEventListener("click", () => {
 
 function renderEmptyState(data) {
     const box = $("emptyState");
+    document.querySelector(".result-table thead").hidden = data.total === 0;
     if (data.total > 0) {
         box.hidden = true;
         return;
     }
     const suggestionsHtml = (data.suggestions || []).length
-        ? `<p>Did you mean ${data.suggestions.map(p =>
-            `<button type="button" class="proto" data-suggest="${escapeHtml(p)}">${escapeHtml(p)}</button>`).join(" ")}?</p>`
+        ? `<p>Did you mean: ${data.suggestions.map(p =>
+            `<button type="button" class="proto" data-suggest="${escapeHtml(p)}">${escapeHtml(p)}</button>`).join(" ")}</p>`
         : "";
     box.innerHTML = terms.length
         ? `<h3>No capture matches this search</h3>
@@ -613,10 +623,16 @@ function setFilterStatus(kind, text) {
     const el = $("filterStatus");
     el.dataset.kind = kind;
     el.textContent = text;
+    // Export waits for the check, and stays off for a filter tshark rejected
+    // (pressing it only produced a 400). No job running: the button is shown.
+    if (!$("exportStart").hidden && !exportState.timer) {
+        $("exportStart").disabled = kind === "pending" || kind === "error";
+    }
 }
 
 function resetExportResult() {
     clearInterval(exportState.timer);
+    exportState.timer = null;
     exportState.jobId = null;
     $("exportProgress").hidden = true;
     $("exportDownload").hidden = true;
@@ -662,7 +678,7 @@ function onFilterInput() {
         } catch (_) {
             setFilterStatus("", "Could not check the filter right now.");
         }
-    }, 400);
+    }, 250);
 }
 
 function showExportJob(job) {
@@ -684,7 +700,7 @@ function showExportJob(job) {
         text.textContent = `${formatCount(job.packets)} packets · ${formatFileSize(job.size_bytes)}` +
             (job.cached ? " · from cache" : "");
         const link = $("exportDownload");
-        link.href = job.download_url;
+        link.href = apiUrl(`exports/${job.id}/download`);
         link.hidden = false;
         $("exportStart").hidden = true;
         if (exportState.autoDownload) {
@@ -719,7 +735,8 @@ async function startExport() {
         if (!res.ok) {
             const detail = typeof body.detail === "string" ? body.detail : `${res.status} ${res.statusText}`;
             setFilterStatus("error", detail.replace(/^Invalid display filter: /, ""));
-            $("exportStart").disabled = false;
+            // a rejected filter keeps Export off until it is edited
+            $("exportStart").disabled = res.status === 400;
             return;
         }
         exportState.autoDownload = true;
@@ -735,9 +752,13 @@ function pollExport(jobId) {
     exportState.timer = setInterval(async () => {
         try {
             const job = await api(`exports/${jobId}`);
-            if (!showExportJob(job)) clearInterval(exportState.timer);
+            if (!showExportJob(job)) {
+                clearInterval(exportState.timer);
+                exportState.timer = null;
+            }
         } catch (_) {
             clearInterval(exportState.timer);
+            exportState.timer = null;
             $("exportProgressText").textContent = "Lost track of the export. Press Export to check again.";
             $("exportStart").hidden = false;
             $("exportStart").disabled = false;
@@ -753,6 +774,11 @@ $("exportStart").addEventListener("click", startExport);
 $("exportClose").addEventListener("click", closeExportDialog);
 $("exportCancel").addEventListener("click", closeExportDialog);
 $("exportDialog").addEventListener("cancel", () => clearInterval(exportState.timer));
+// A click on the dialog element itself (not its content) is a click on the
+// backdrop: close, like the details drawer does.
+$("exportDialog").addEventListener("click", (e) => {
+    if (e.target === $("exportDialog")) closeExportDialog();
+});
 // "Export" next to a protocol in the details drawer (info-modal.js)
 document.addEventListener("pcap-export", (e) => {
     openExportDialog(e.detail.file);
@@ -776,7 +802,9 @@ async function checkHealth() {
     try {
         const res = await api(API_PATH.SERVER_HEALTH_CHECK_PATH);
         if ($("serverStatus").dataset.state !== "scanning") {
-            setServerStatus(res.status === "OK" ? "ok" : "down", res.status === "OK" ? "Server online" : "Server error");
+            if (res.status === "OK") setServerStatus("ok", "Server online");
+            else if (res.redis === "loading") setServerStatus("scanning", "Catalog loading");
+            else setServerStatus("down", "Database offline");
         }
     } catch (_) {
         setServerStatus("down", "Server offline");
@@ -845,9 +873,22 @@ function setScanning(on) {
     $("scanBtn").disabled = on;
     $("scanModeSelect").disabled = on;
     $("scanBtn").querySelector("span").textContent = on ? "Scanning…" : "Scan";
+    if (!on) $("scanBtn").title = "";
     $("scanBtn").querySelector("i").classList.toggle("fa-spin", on);
     $("cancelScanBtn").hidden = !on;
     if (on) setServerStatus("scanning", "Scanning");
+}
+
+// While a scan runs: "Scanning 12/28…" on the button, and the file(s) being
+// read in its tooltip. A multi-GB capture takes minutes; without this the
+// button looked stuck.
+function showScanProgress(s) {
+    const label = $("scanBtn").querySelector("span");
+    label.textContent = s.total_files
+        ? `Scanning ${s.processed_files}/${s.total_files}…`
+        : "Scanning…";
+    const names = (s.current_files || []).map(p => p.split("/").pop());
+    $("scanBtn").title = names.length ? `Now scanning: ${names.join(", ")}` : (s.message || "");
 }
 
 function pollScan() {
@@ -855,7 +896,10 @@ function pollScan() {
     scanTimer = setInterval(async () => {
         try {
             const s = await api(API_PATH.SCAN_STATUS_PATH);
-            if (s.state === SERVER_SCANNING_FILE_STATUS.RUNNING) return;
+            if (s.state === SERVER_SCANNING_FILE_STATUS.RUNNING) {
+                showScanProgress(s);
+                return;
+            }
             clearInterval(scanTimer);
             setScanning(false);
             setServerStatus("ok", "Server online");

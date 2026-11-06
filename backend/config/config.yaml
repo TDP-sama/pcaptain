@@ -1,30 +1,33 @@
-port: 7000
-public_url: http://localhost:7000
+# Built-in defaults, baked into the backend image. You do not need to edit or
+# mount this file: set the environment variable named in a line's comment
+# instead (normally in .env, passed through docker-compose.yml); it always wins
+# over the value here. Lines without a variable name are fixed in the image.
+port: 7000                      # PORT
+public_url: ""                  # PUBLIC_URL: put in front of the download links the API returns (e.g. https://pcaps.example.com/api); empty = relative links, right for the web UI
 redis:
-  host: redis
-  port: 6380
+  host: redis                   # REDIS_HOST
+  port: 6379                    # REDIS_PORT
+  wait_seconds: 120             # REDIS_WAIT_SECONDS: how long startup waits for Redis to load
 pcap:
-  root_directory: /pcaps
-  # Replace with root directory for processed pcap files path when return to client
-  prefix_str: ./pcaps
+  root_directory: /pcaps        # PCAP_ROOT_DIRECTORY: where the pcap folder is mounted in the container
+  prefix_str: null              # PCAP_PREFIX_STR: show this host path instead of root_directory in results
   allowed_file_extensions:
     - .pcap
     - .pcapng
     - .cap
-  scan_interval_seconds: 3600 # 1 hour
-  scan_mode: fast # options: full, quick, fast
-  max_parallel_scans: 4 # files scanned at the same time
-  large_file_size: 512M # files this big or bigger are scanned one at a time
-  tshark_session_reset: 500000 # tshark -M: reset dissector state every N packets (0 = never)
-  # Quick scan (tshark sampling) settings
-  # for files >= min_file_size, and only scan `pebc` of bytes.
-  quick_scan:
-    pebc: 0.1
-    min_file_size: 1024
-    config_version: v1
+  scan_interval_seconds: 3600   # PCAP_SCAN_INTERVAL_SECONDS: automatic rescan interval
+  scan_mode: fast               # SCAN_MODE: fast | quick | full (a change made in the UI is kept in Redis and wins)
+  max_parallel_scans: 4         # MAX_PARALLEL_SCANS: files scanned at the same time
+  large_file_size: 512M         # LARGE_FILE_SIZE: files this big or bigger are "large"
+  large_file_parallel_scans: 1  # LARGE_FILE_PARALLEL_SCANS: large files scanned at the same time
+  tshark_session_reset: 500000  # TSHARK_SESSION_RESET: tshark -M, reset dissector state every N packets (0 = never)
+  quick_scan:                   # quick mode: tshark decodes only the first part of files >= min_file_size
+    pebc: 0.1                   # QUICK_SCAN_PEBC: share of each file to decode
+    min_file_size: 1024         # QUICK_SCAN_MIN_FILE_SIZE
+    config_version: v1          # QUICK_SCAN_CONFIG_VERSION: bump to force quick rescans
 export:
-  cache_dir: /data/exports # filtered extracts, reused for the same file + filter
-  cache_max_size: 5G # oldest-used extracts are deleted above this
-  max_jobs: 2 # filter exports running at once
+  cache_dir: /data/exports      # filtered extracts (the export_cache volume)
+  cache_max_size: 5G            # EXPORT_CACHE_MAX_SIZE: oldest-used extracts are deleted above this
+  max_jobs: 2                   # EXPORT_MAX_JOBS: filter exports running at once
 log:
-  level: INFO
+  level: INFO                   # LOG_LEVEL

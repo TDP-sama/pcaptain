@@ -64,8 +64,19 @@ class ExportJob:
         return d
 
 
+# A double-quoted string in a display filter, with backslash escapes.
+_QUOTED = re.compile(r'("(?:[^"\\]|\\.)*")')
+
+
 def normalize_filter(display_filter: str) -> str:
-    return re.sub(r"\s+", " ", display_filter.strip())
+    """Collapse runs of whitespace, so "sip  ||  sdp" and "sip || sdp" share a
+    cache entry, but leave quoted strings alone: 'frame contains "a  b"' looks
+    for two spaces."""
+    parts = _QUOTED.split(display_filter.strip())
+    return "".join(
+        part if i % 2 else re.sub(r"\s+", " ", part)
+        for i, part in enumerate(parts)
+    )
 
 
 def export_id(file_hash: str, display_filter: str) -> str:
@@ -82,14 +93,12 @@ class ExportService:
     def __init__(self, cache_dir: str, cache_max_size: int | str, max_jobs: int, session_reset: int):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_max_bytes = (
-            cache_max_size if isinstance(cache_max_size, int)
-            else parse_size_bytes(str(cache_max_size), default=5 * 1024**3)
-        )
+        self.cache_max_bytes = parse_size_bytes(cache_max_size, default=5 * 1024**3)
         self.session_reset = session_reset
         self._pool = ThreadPoolExecutor(max_workers=max_jobs, thread_name_prefix="export")
         self._jobs: Dict[str, ExportJob] = {}
         self._lock = threading.Lock()
+        self._evict_lock = threading.Lock()
         self._empty_pcap = self.cache_dir / ".empty.pcap"
         self._empty_pcap.write_bytes(EMPTY_PCAP)
         # Leftovers from a run that was killed mid-export.
@@ -120,17 +129,33 @@ class ExportService:
     def _extract_path(self, job_id: str) -> Path:
         return self.cache_dir / f"{job_id}{EXTRACT_SUFFIX}"
 
-    def _evict(self) -> None:
-        extracts = sorted(self.cache_dir.glob(f"*{EXTRACT_SUFFIX}"), key=lambda p: p.stat().st_mtime)
-        total = sum(p.stat().st_size for p in extracts)
-        for p in extracts:
-            if total <= self.cache_max_bytes:
-                break
-            total -= p.stat().st_size
-            p.unlink(missing_ok=True)
-            with self._lock:
-                self._jobs.pop(p.stem, None)
-            logger.info("Evicted cached extract %s", p.name)
+    def _evict(self, keep: Optional[Path] = None) -> None:
+        """Delete least recently used extracts until the cache fits.
+
+        `keep` (the extract just finished) is never deleted, even if it alone is
+        bigger than the cache: it used to evict itself, and its download
+        answered 404 right after the job reported "ready".
+        """
+        with self._evict_lock:  # two jobs finishing together must not both evict
+            extracts = []
+            for p in self.cache_dir.glob(f"*{EXTRACT_SUFFIX}"):
+                try:
+                    st = p.stat()
+                except FileNotFoundError:
+                    continue
+                extracts.append((st.st_mtime, st.st_size, p))
+            extracts.sort(key=lambda e: e[0])
+            total = sum(size for _, size, _ in extracts)
+            for _, size, p in extracts:
+                if total <= self.cache_max_bytes:
+                    break
+                if keep is not None and p == keep:
+                    continue
+                total -= size
+                p.unlink(missing_ok=True)
+                with self._lock:
+                    self._jobs.pop(p.stem, None)
+                logger.info("Evicted cached extract %s", p.name)
 
     # --- jobs ---
     def has_result(self, file_hash: str, display_filter: str) -> bool:
@@ -169,16 +194,19 @@ class ExportService:
                 source_name=source_name, filter=display_filter,
             )
             cached = self._extract_path(job_id)
-            if cached.exists():
+            found_on_disk = cached.exists()
+            if found_on_disk:
                 # Finished by an earlier process (e.g. before a restart).
                 job.state, job.cached, job.progress = JobState.READY, True, 1.0
                 job.size_bytes = cached.stat().st_size
-                job.packets = _count_packets(cached)
                 job.finished_at = time.time()
-                self._jobs[job_id] = job
-                return job
-
             self._jobs[job_id] = job
+
+        if found_on_disk:
+            # Counted outside the lock: capinfos reads the whole extract, and
+            # every other export request waited for it.
+            job.packets = count_packets(cached)
+            return job
 
         self._pool.submit(self._run, job)
         return job
@@ -217,7 +245,7 @@ class ExportService:
                 # A capture cut off mid-packet: what was read before the cut is valid.
                 logger.warning("Export %s: tshark exit %s, keeping output. %s", job.id, proc.returncode, message)
 
-            packets = _count_packets(tmp) if wrote else 0
+            packets = count_packets(tmp) if wrote else 0
             if not packets:
                 tmp.unlink(missing_ok=True)
                 job.state, job.packets = JobState.EMPTY, 0
@@ -225,7 +253,7 @@ class ExportService:
                 tmp.replace(final)
                 job.packets, job.size_bytes = packets, final.stat().st_size
                 job.state = JobState.READY
-                self._evict()
+                self._evict(keep=final)
             job.progress = 1.0
             logger.info("Export %s finished: %s, %s packets", job.id, job.state.value, job.packets)
         except Exception as e:
@@ -254,7 +282,7 @@ def _read_position(pid: int, path: str) -> Optional[int]:
     return None
 
 
-def _count_packets(path: Path) -> Optional[int]:
+def count_packets(path) -> Optional[int]:
     try:
         out = subprocess.run(["capinfos", "-M", "-c", str(path)], capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired):

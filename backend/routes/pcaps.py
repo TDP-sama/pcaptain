@@ -1,15 +1,110 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
-from fastapi.responses import FileResponse
-import os
 import asyncio
-from services.logger import get_logger
+import os
 import re
-import uuid
-from services.context import get_app_context, AppContext
+import subprocess
+import tempfile
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
+
+from services.context import AppContext, get_app_context
+from services.export import count_packets, get_export_service, normalize_filter
+from services.logger import get_logger
 from services.scan import PCAP_FILE_KEY_PREFIX
 
 router = APIRouter(tags=["Pcaps"])
 logger = get_logger(__name__)
+
+PCAP_MEDIA_TYPE = "application/vnd.tcpdump.pcap"
+# The legacy one-shot filter routes below decode the whole file inside the
+# request. Bound how many run at once and for how long; POST /exports is the
+# way to filter large captures (background job, progress, cache).
+LEGACY_FILTER_TIMEOUT_SECONDS = 15 * 60
+_legacy_filter_slots = asyncio.Semaphore(2)
+
+
+def resolve_catalog_file(context: AppContext, metadata: dict) -> str:
+    """Path of an indexed capture, checked to lie under the pcap root.
+
+    The path comes from the catalog (the scanner found it by walking the root),
+    so it is normalised, not resolved: a capture that is a symlink still works.
+    404 when it is no longer on disk (it used to fail with a 500).
+    """
+    root = os.path.normpath(context.config.pcap.root_directory)
+    path = os.path.normpath(metadata.get("path") or "")
+    if not os.path.isabs(path) or os.path.commonpath([root, path]) != root:
+        raise HTTPException(status_code=403, detail="Forbidden: Access is denied.")
+    if not os.path.isfile(path):
+        raise HTTPException(
+            status_code=404,
+            detail="The capture is no longer on disk. It will leave the catalog with the next scan.",
+        )
+    return path
+
+
+async def _catalog_entry(context: AppContext, file_hash: str) -> dict:
+    metadata = await asyncio.to_thread(
+        context.redis_client.hgetall, f"{PCAP_FILE_KEY_PREFIX}:{file_hash}"
+    )
+    if not metadata:
+        raise HTTPException(status_code=404, detail="File not found")
+    return metadata
+
+
+def remove_file(path: str):
+    try:
+        os.remove(path)
+        logger.info(f"Cleaned up temporary file: {path}")
+    except OSError as e:
+        logger.error(f"Error deleting temporary file {path}: {e}")
+
+
+def _filter_to_temp_file(source: str, display_filter: str, session_reset: int) -> str:
+    """Write the packets of `source` matching `display_filter` to a temp file
+    and return its path. Raises HTTPException on a bad filter or no match."""
+    error = get_export_service().validate(display_filter)
+    if error:
+        raise HTTPException(status_code=400, detail=f"Invalid display filter: {error}")
+
+    fd, temp_path = tempfile.mkstemp(prefix="filtered_", suffix=".pcap")
+    os.close(fd)
+    cmd = ["tshark", "-n", "-r", source, "-Y", display_filter, "-w", temp_path, "-F", "pcap"]
+    if session_reset > 0:  # 0 means "never reset", as in the scanner
+        cmd += ["-M", str(session_reset)]
+    logger.info("Starting one-shot filtered download: %s", " ".join(cmd))
+    try:
+        try:
+            proc = subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                timeout=LEGACY_FILTER_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(
+                status_code=504,
+                detail="Filtering took too long. Use POST /exports for large captures.",
+            )
+        wrote = os.path.exists(temp_path) and os.path.getsize(temp_path) > 0
+        if proc.returncode != 0 and not wrote:
+            logger.error("tshark filter failed: %s", proc.stderr)
+            raise HTTPException(status_code=500, detail="Failed to filter the pcap file.")
+        # tshark always writes a file header, so "no match" is a file with no
+        # packets, not an empty file (which used to be returned with a 200).
+        if not count_packets(temp_path):
+            raise HTTPException(status_code=404, detail=f"No packets match the filter '{display_filter}'")
+        return temp_path
+    except BaseException:
+        remove_file(temp_path)
+        raise
+
+
+async def _filtered_response(context, metadata, display_filter, background_tasks, download_name):
+    source = resolve_catalog_file(context, metadata)
+    async with _legacy_filter_slots:
+        temp_path = await asyncio.to_thread(
+            _filter_to_temp_file, source, display_filter, context.config.pcap.tshark_session_reset
+        )
+    background_tasks.add_task(remove_file, temp_path)
+    return FileResponse(temp_path, media_type=PCAP_MEDIA_TYPE, filename=download_name)
 
 
 @router.get(
@@ -18,83 +113,21 @@ logger = get_logger(__name__)
 async def download_pcap_by_hash(
     file_hash: str,
     background_tasks: BackgroundTasks,
-
     # display filter
-    filter: str | None = Query(default=None, description="Filter to apply when downloading a subset of the pcap"),
+    filter: str | None = Query(default=None, max_length=2000,
+                               description="Filter to apply when downloading a subset of the pcap"),
     context: AppContext = Depends(get_app_context)
 ):
-    if not context.redis_client:
-        raise HTTPException(
-            status_code=503, detail="Service unavailable: Redis connection failed."
-        )
-
-    file_metadata = await asyncio.to_thread(
-        context.redis_client.hgetall, f"{PCAP_FILE_KEY_PREFIX}:{file_hash}"
-    )
-    if not file_metadata:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    file_path = file_metadata.get("path")
-    filename = file_metadata.get("filename")
-
-    abs_path = await asyncio.to_thread(os.path.abspath, file_path)
-    allowed_abs_dirs = [
-        await asyncio.to_thread(os.path.abspath, context.config.pcap.root_directory)
-    ]
-    if not any(abs_path.startswith(d) for d in allowed_abs_dirs):
-        raise HTTPException(status_code=403, detail="Forbidden: Access is denied.")
+    metadata = await _catalog_entry(context, file_hash)
+    filename = metadata.get("filename")
 
     # No filter -> return original file
     if not filter or not filter.strip():
-        return FileResponse(abs_path, media_type="application/vnd.tcpdump.pcap", filename=filename)
-
-    filter = filter.strip()
-
-    temp_filename = f"filtered_df_{uuid.uuid4()}.pcap"
-    temp_filepath = f"/tmp/{temp_filename}"
+        path = resolve_catalog_file(context, metadata)
+        return FileResponse(path, media_type=PCAP_MEDIA_TYPE, filename=filename)
 
     # Kept for old links; the UI now uses POST /exports (background job + cache).
-    cmd = ["tshark", "-n", "-r", abs_path, "-Y", filter, "-w", temp_filepath,
-           "-M", str(context.config.pcap.tshark_session_reset or 500000)]
-    logger.info(f"Starting display-filter export: {' '.join(cmd)}")
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-
-        if process.returncode != 0:
-            err = stderr.decode(errors="ignore")
-            logger.error(f"Tshark display filter failed: {err}")
-            raise HTTPException(status_code=400, detail=f"Invalid display filter: {err}")
-
-        if not os.path.exists(temp_filepath) or os.path.getsize(temp_filepath) == 0:
-            raise HTTPException(status_code=404, detail=f"No packets found matching display filter '{filter}'")
-
-    except HTTPException:
-        if os.path.exists(temp_filepath):
-            os.remove(temp_filepath)
-        raise
-    except Exception as e:
-        logger.error(f"Error executing tshark for display filter: {e}")
-        if os.path.exists(temp_filepath):
-            os.remove(temp_filepath)
-        raise HTTPException(status_code=500, detail="Internal Server Error during display filtering")
-
-    background_tasks.add_task(remove_file, temp_filepath)
-
-    return FileResponse(
-        temp_filepath, media_type="application/vnd.tcpdump.pcap", filename=filename
-    )
-
-
-def remove_file(path: str):
-    try:
-        os.remove(path)
-        logger.info(f"Cleaned up temporary file: {path}")
-    except Exception as e:
-        logger.error(f"Error deleting temporary file {path}: {e}")
+    return await _filtered_response(context, metadata, normalize_filter(filter), background_tasks, filename)
 
 
 @router.get(
@@ -106,57 +139,10 @@ async def download_filtered_pcap(
     background_tasks: BackgroundTasks,
     context: AppContext = Depends(get_app_context),
 ):
-    if not context.redis_client:
-        raise HTTPException(status_code=503, detail="Service unavailable")
-
-    file_metadata = await asyncio.to_thread(
-        context.redis_client.hgetall, f"{PCAP_FILE_KEY_PREFIX}:{file_hash}"
-    )
-    if not file_metadata:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    original_path = file_metadata.get("path")
-    original_filename = file_metadata.get("filename")
-
     if not re.match(r"^[a-zA-Z0-9_.-]+$", protocol):
         raise HTTPException(status_code=400, detail="Invalid protocol format")
-
-    temp_filename = f"filtered_{protocol}_{uuid.uuid4()}.pcap"
-    temp_filepath = f"/tmp/{temp_filename}"
-
-    cmd = ["tshark", "-n", "-r", original_path, "-Y", protocol, "-w", temp_filepath,
-           "-M", str(context.config.pcap.tshark_session_reset or 500000)]
-
-    logger.info(f"Starting filtered export: {' '.join(cmd)}")
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-
-        if process.returncode != 0:
-            logger.error(f"Tshark filter failed: {stderr.decode()}")
-            raise HTTPException(status_code=500, detail="Failed to filter pcap file.")
-
-        if not os.path.exists(temp_filepath) or os.path.getsize(temp_filepath) == 0:
-            raise HTTPException(
-                status_code=404, detail=f"No packets found for protocol '{protocol}'"
-            )
-
-    except Exception as e:
-        logger.error(f"Error executing tshark: {e}")
-        # Clean up if it failed halfway
-        if os.path.exists(temp_filepath):
-            os.remove(temp_filepath)
-        raise HTTPException(
-            status_code=500, detail="Internal Server Error during filtering"
-        )
-
-    background_tasks.add_task(remove_file, temp_filepath)
-
-    return FileResponse(
-        temp_filepath,
-        media_type="application/vnd.tcpdump.pcap",
-        filename=f"subset_{protocol}_{original_filename}",
+    metadata = await _catalog_entry(context, file_hash)
+    return await _filtered_response(
+        context, metadata, protocol, background_tasks,
+        f"subset_{protocol}_{metadata.get('filename')}",
     )

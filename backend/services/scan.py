@@ -1,6 +1,7 @@
 from collections import Counter, deque
 import contextlib
 from enum import Enum
+from itertools import islice
 import json
 import os
 import re
@@ -16,7 +17,7 @@ from redis import Redis
 
 from .logger import get_logger
 from .context import AppContext, get_app_context, with_app_context
-from .config import ScanMode
+from .config import ScanMode, parse_size_bytes  # parse_size_bytes re-exported for callers
 
 logger = get_logger(__name__)
 
@@ -55,32 +56,107 @@ TSHARK_LEAN_PREFS = (
     "ipv6.defragment:FALSE",
 )
 
-# How often (in output lines) the streaming reader checks for a cancel request.
-CANCEL_CHECK_EVERY_LINES = 10_000
+# How many output lines the streaming reader counts per batch; it checks for a
+# cancel request between batches.
+CANCEL_CHECK_EVERY_LINES = 50_000
+
+# Bumped when the layout of the protocol index changes; startup rebuilds the
+# index once when the stored version is older (see ensure_index_version).
+INDEX_VERSION = "2"
+INDEX_VERSION_FIELD = "index_version"
+SETTINGS_KEY = "pcap:settings"
+DASHBOARD_SUMMARY_KEY = "dashboard:summary"
+SORT_INDEXES = (SORT_INDEX_SIZE, SORT_INDEX_PACKET_COUNT, SORT_INDEX_FILENAME, SORT_INDEX_PATH)
 
 
-def parse_size_bytes(value: Optional[str], default: int) -> int:
-    if value is None:
-        return default
-    stripped = value.strip()
-    if not stripped:
-        return default
-    match = re.fullmatch(r"(?i)\s*(\d+(?:\.\d+)?)\s*([kmgt]?)\s*", stripped)
-    if not match:
-        raise ValueError(f"Invalid size value: '{value}'")
-    number_str, suffix = match.groups()
-    number = float(number_str)
-    if number < 0:
-        raise ValueError(f"Size value must be non-negative: '{value}'")
-    multipliers = {
-        "": 1,
-        "k": 1024,
-        "m": 1024**2,
-        "g": 1024**3,
-        "t": 1024**4,
-    }
-    return int(number * multipliers[suffix.lower()])
+def _protocol_key(protocol: str) -> str:
+    return f"{PROTOCOCOL_INDEX_PREFIX}:{protocol.lower()}"
 
+
+def _split_protocols(value: Optional[str]) -> List[str]:
+    return [p for p in (value or "").split(",") if p]
+
+
+def remove_catalog_entry(redis_client, file_hash: str, stored: Optional[Dict[str, str]] = None) -> List[str]:
+    """Delete one file from the catalog: its hash, its protocol index
+    memberships and its sort scores. Returns the protocols it had."""
+    pcap_key = f"{PCAP_FILE_KEY_PREFIX}:{file_hash}"
+    if stored is None:
+        stored = redis_client.hgetall(pcap_key)
+    protocols = _split_protocols(stored.get("protocols"))
+    pipe = redis_client.pipeline()
+    for proto in protocols:
+        pipe.srem(_protocol_key(proto), file_hash)
+    for index in SORT_INDEXES:
+        pipe.zrem(index, file_hash)
+    pipe.delete(pcap_key)
+    pipe.execute()
+    path = stored.get("path")
+    # only if the path still points at this entry
+    if path and redis_client.hget(PATH_MAP_KEY, path) == file_hash:
+        redis_client.hdel(PATH_MAP_KEY, path)
+    return protocols
+
+
+def drop_unused_protocols(redis_client, protocols) -> None:
+    """Remove protocols that no file has any more from autocomplete."""
+    protocols = sorted(set(protocols))
+    if not protocols:
+        return
+    pipe = redis_client.pipeline()
+    for proto in protocols:
+        pipe.exists(_protocol_key(proto))
+    gone = [p for p, exists in zip(protocols, pipe.execute()) if not exists]
+    if gone:
+        redis_client.zrem(AUTOCOMPLETE_KEY, *gone)
+
+
+def rebuild_protocol_index_sync(redis_client) -> int:
+    """Rebuild every protocol set and the autocomplete list from the file
+    entries themselves. Repairs catalogs indexed before re-indexing removed
+    old memberships (a file rescanned in full mode kept the protocols fast
+    mode had guessed, so searches returned files without the protocol)."""
+    members: Dict[str, Set[str]] = {}
+    names: Set[str] = set()
+    files = 0
+    keys = list(redis_client.scan_iter(f"{PCAP_FILE_KEY_PREFIX}:*", count=1000))
+    for start in range(0, len(keys), 1000):
+        batch = keys[start:start + 1000]
+        pipe = redis_client.pipeline(transaction=False)
+        for key in batch:
+            pipe.hget(key, "protocols")
+        for key, value in zip(batch, pipe.execute()):
+            file_hash = key.rsplit(":", 1)[-1]
+            files += 1
+            for proto in _split_protocols(value):
+                names.add(proto)
+                members.setdefault(proto.lower(), set()).add(file_hash)
+
+    old_keys = list(redis_client.scan_iter(f"{PROTOCOCOL_INDEX_PREFIX}:*", count=1000))
+    pipe = redis_client.pipeline()  # MULTI: searches never see a half-built index
+    if old_keys:
+        pipe.delete(*old_keys)
+    for proto, hashes in members.items():
+        pipe.sadd(_protocol_key(proto), *hashes)
+    pipe.delete(AUTOCOMPLETE_KEY)
+    if names:
+        pipe.zadd(AUTOCOMPLETE_KEY, {p: 0 for p in names})
+    pipe.hset(SETTINGS_KEY, INDEX_VERSION_FIELD, INDEX_VERSION)
+    pipe.execute()
+    logger.info("Rebuilt the protocol index from %d files (%d protocols)", files, len(members))
+    return files
+
+
+def ensure_index_version(redis_client) -> None:
+    if redis_client.hget(SETTINGS_KEY, INDEX_VERSION_FIELD) != INDEX_VERSION:
+        rebuild_protocol_index_sync(redis_client)
+
+
+def _file_size_or_none(path: str) -> Optional[int]:
+    try:
+        return os.path.getsize(path)
+    except OSError:  # deleted since it was listed, or a dangling symlink
+        return None
 
 
 def get_effective_scan_mode(
@@ -289,7 +365,14 @@ class ScanService:
         "state": ScanState.IDLE,
         "indexed_files": 0,
         "message": "Ready",
+        # progress of the running scan
+        "total_files": 0,
+        "processed_files": 0,
+        "current_files": [],
+        "removed_files": 0,
+        "started_at": None,
     }
+    _start_lock = threading.Lock()
 
     backfill_status: Dict[str, Any] = {
         "state": BackfillState.IDLE,
@@ -309,7 +392,30 @@ class ScanService:
 
     scan_cancel_event = Event()
     scan_process: Dict[str, Optional[subprocess.Popen]] = {"tshark": None}
-    
+
+    def try_begin_scan(self) -> bool:
+        """Mark a scan as running unless one already is. Callers that get True
+        must then run scan_wrapper. Checking and setting under one lock stops
+        two requests (or a request and the scheduler) from both starting one."""
+        with self._start_lock:
+            if self.scan_status["state"] == ScanState.RUNNING:
+                return False
+            self.scan_status.update(
+                state=ScanState.RUNNING, indexed_files=0, message="Starting scan...",
+                total_files=0, processed_files=0, current_files=[], removed_files=0,
+                started_at=time.time(),
+            )
+            # A cancel request belongs to the scan it was made for; without this
+            # every later scan (including the scheduled ones) stopped at once.
+            self.scan_cancel_event.clear()
+            return True
+
+    def status_snapshot(self) -> Dict[str, Any]:
+        snapshot = dict(self.scan_status)
+        snapshot["current_files"] = list(snapshot.get("current_files") or [])
+        snapshot["state"] = ScanState(snapshot["state"]).value
+        return snapshot
+
     async def should_process_file(
         self,
         *,
@@ -378,19 +484,29 @@ class ScanService:
 
         # stored_path missing or points to a file that no longer exists -> consider it moved
         logger.info("File moved. Updating Redis path for %s", file_path)
+        stat = await asyncio.to_thread(os.stat, file_path)
+        filename = os.path.basename(file_path)
         pipe = redis_client.pipeline()
         pipe.hset(
             pcap_key,
             mapping={
                 "path": file_path,
+                "path_sort": file_path.lower(),
+                # a move can also rename the file: search and sorting use these
+                "filename": filename,
+                "filename_sort": filename.lower(),
                 "source_directory": os.path.dirname(file_path),
-                "last_modified": await asyncio.to_thread(os.path.getmtime, file_path),
+                "size_bytes": stat.st_size,
+                "last_modified": stat.st_mtime,
                 "last_scanned": time.time(),
             },
         )
+        pipe.zadd(LEX_INDEX_FILENAME, {filename.lower(): 0}, nx=True)
+        pipe.zadd(LEX_INDEX_PATH, {file_path.lower(): 0}, nx=True)
         if stored_path:
             pipe.hdel(PATH_MAP_KEY, stored_path)
         pipe.hset(PATH_MAP_KEY, file_path, pcap_key.rsplit(":", 1)[-1])
+        pipe.set(REBUILD_DIRTY, 1)
         await asyncio.to_thread(pipe.execute)
         return False
 
@@ -443,23 +559,29 @@ class ScanService:
         allowed_extensions: tuple,
         target_folder: Optional[str],
     ) -> Tuple[List[str], bool]:
-        collected: List[str] = []
-        found_matching_folder = False
+        extensions = tuple(e.lower() for e in allowed_extensions)
 
-        for root, dirs, files in await asyncio.to_thread(os.walk, root_directory):
-            check_cancellation(self.scan_cancel_event)
-            
-            if target_folder:
-                if os.path.basename(root) != target_folder:
-                    continue
-                found_matching_folder = True
+        def walk() -> Tuple[List[str], bool]:
+            # The whole walk runs in a worker thread: iterating os.walk on the
+            # event loop blocked the API for as long as the directory tree took.
+            collected: List[str] = []
+            found_matching_folder = False
+            for root, dirs, files in os.walk(root_directory):
+                check_cancellation(self.scan_cancel_event)
 
-            for filename in files:
-                if filename in exclude_files or not filename.endswith(allowed_extensions):
-                    continue
-                collected.append(os.path.join(root, filename))
+                if target_folder:
+                    if os.path.basename(root) != target_folder:
+                        continue
+                    found_matching_folder = True
 
-        return collected, found_matching_folder
+                for filename in files:
+                    # .PCAP and .pcap alike
+                    if filename in exclude_files or not filename.lower().endswith(extensions):
+                        continue
+                    collected.append(os.path.join(root, filename))
+            return collected, found_matching_folder
+
+        return await asyncio.to_thread(walk)
 
     # Process a single file
     async def process_one_file(
@@ -471,14 +593,25 @@ class ScanService:
         large_file_bytes: int,
         **kwargs,
     ) -> None:
-        file_size = await asyncio.to_thread(os.path.getsize, file_path)
-        # Large captures are scanned one at a time. They queue for that slot
-        # before taking a general one, so waiting large files never hold up
-        # small ones.
+        file_size = await asyncio.to_thread(_file_size_or_none, file_path)
+        if file_size is None:
+            logger.warning("Skipping %s: it disappeared before it could be scanned", file_path)
+            self.scan_status["processed_files"] += 1
+            return
+        # Large captures share a small number of slots (LARGE_FILE_PARALLEL_SCANS).
+        # They queue for that slot before taking a general one, so waiting
+        # large files never hold up small ones.
         large_gate = large_semaphore if file_size >= large_file_bytes else contextlib.nullcontext()
         async with large_gate:
             async with semaphore:
-                await self._process_one_file(file_path, **kwargs)
+                current = self.scan_status["current_files"]
+                current.append(file_path)
+                try:
+                    await self._process_one_file(file_path, **kwargs)
+                finally:
+                    with contextlib.suppress(ValueError):
+                        current.remove(file_path)
+                    self.scan_status["processed_files"] += 1
 
     async def _process_one_file(
         self,
@@ -504,10 +637,7 @@ class ScanService:
         base_scan_mode = config.pcap.scan_mode
 
         qs = config.pcap.quick_scan
-        if isinstance(qs.min_file_size, int):
-            quick_min_size_bytes = qs.min_file_size
-        else:
-            quick_min_size_bytes = parse_size_bytes(str(qs.min_file_size), default=0)
+        quick_min_size_bytes = parse_size_bytes(qs.min_file_size, default=0)
 
         current_scan_mode, current_pebc, current_config_version = get_effective_scan_mode(
             file_size,
@@ -531,6 +661,23 @@ class ScanService:
             return
 
         file_hash = await calculate_sha256(file_path)
+
+        # The content at this path changed (new hash): the entry for the old
+        # content describes a file that no longer exists, and used to stay in
+        # the catalog next to the new one.
+        previous_hash = await asyncio.to_thread(redis_client.hget, PATH_MAP_KEY, file_path)
+        if previous_hash and previous_hash != file_hash:
+            previous = await asyncio.to_thread(
+                redis_client.hgetall, f"{PCAP_FILE_KEY_PREFIX}:{previous_hash}"
+            )
+            if previous.get("path") == file_path:
+                logger.info("%s changed since it was indexed; removing the old entry", file_path)
+                old_protocols = await asyncio.to_thread(
+                    remove_catalog_entry, redis_client, previous_hash, previous
+                )
+                await asyncio.to_thread(drop_unused_protocols, redis_client, old_protocols)
+            else:
+                await asyncio.to_thread(redis_client.hdel, PATH_MAP_KEY, file_path)
 
         async with seen_hashes_lock:
             if file_hash in seen_hashes:
@@ -557,7 +704,7 @@ class ScanService:
         quick_threshold_bytes: Optional[int] = None
         if current_scan_mode == ScanMode.QUICK and current_pebc is not None:
             quick_threshold_bytes = int(file_size * current_pebc)
-        
+
         logger.info("Processing file: %s (scan_mode: %s)", file_path, current_scan_mode.value)
 
         # Call fastscan
@@ -572,7 +719,7 @@ class ScanService:
         if protocol_result is None:
             logger.warning(f"Skipping file {filename} from index due to processing error.")
             return
-        
+
         protocol_data, packets_scanned = protocol_result
 
         if current_scan_mode == ScanMode.FAST and set(protocol_data) <= {"eth"}:
@@ -596,13 +743,18 @@ class ScanService:
         # Compute metadata
         protocol_percentages = calculate_protocol_percentages(protocol_data, packets_scanned)
 
-        # The hash only needs recomputing if the file changed during the scan.
-        stat_after = await asyncio.to_thread(os.stat, file_path)
+        # A file still being written (e.g. a running capture) changes while it
+        # is scanned. The protocols read describe neither the old nor the new
+        # content, so do not store them: leave the file for the next scan.
+        # (Storing them with the new size and mtime meant it was never rescanned.)
+        try:
+            stat_after = await asyncio.to_thread(os.stat, file_path)
+        except OSError:
+            logger.warning("%s disappeared while it was scanned; not indexing it", file_path)
+            return
         if (stat_after.st_size, stat_after.st_mtime) != (file_size, mtime):
-            logger.info("%s changed while it was scanned; re-hashing", file_path)
-            file_size, mtime = stat_after.st_size, stat_after.st_mtime
-            file_hash = await calculate_sha256(file_path)
-            pcap_key = f"{PCAP_FILE_KEY_PREFIX}:{file_hash}"
+            logger.warning("%s changed while it was scanned; it will be scanned again next time", file_path)
+            return
 
         protocols = sorted(list(protocol_data.keys()))
         download_url = f"{context.config.public_url}/pcaps/download/{file_hash}"
@@ -622,8 +774,17 @@ class ScanService:
         path_norm = file_path.lower()
         current_time = time.time()
 
+        # Protocols an earlier scan of this content found but this one did not
+        # (typically: guessed from ports in fast mode, absent in a full decode).
+        old_protocols = _split_protocols(
+            await asyncio.to_thread(redis_client.hget, pcap_key, "protocols")
+        )
+        stale_protocols = sorted(set(old_protocols) - set(protocols))
+
         # Write to Redis
         pipe = redis_client.pipeline()
+        for proto in stale_protocols:
+            pipe.srem(_protocol_key(proto), file_hash)
 
         pipe.hset(
             pcap_key,
@@ -655,9 +816,8 @@ class ScanService:
             pipe.zadd(AUTOCOMPLETE_KEY, autocomplete_payload)
 
         for proto in protocols:
-            index_key = f"{PROTOCOCOL_INDEX_PREFIX}:{proto.lower()}"
-            pipe.sadd(index_key, file_hash)
-        
+            pipe.sadd(_protocol_key(proto), file_hash)
+
         # Lexicographical indexes
         pipe.zadd(LEX_INDEX_FILENAME, {filename_norm: 0}, nx=True)
         pipe.zadd(LEX_INDEX_PATH, {path_norm: 0}, nx=True)
@@ -669,6 +829,8 @@ class ScanService:
         pipe.zadd(SORT_INDEX_PATH, {file_hash: 0})
 
         await asyncio.to_thread(pipe.execute)
+        if stale_protocols:
+            await asyncio.to_thread(drop_unused_protocols, redis_client, stale_protocols)
 
         logger.info(
             "Indexed file %s (hash: %s) with protocols: %s",
@@ -697,27 +859,24 @@ class ScanService:
         if not redis_client:
             return {"error": "Redis connection is not available."}
 
-        large_file_size = config.pcap.large_file_size
-        large_file_bytes = (
-            large_file_size if isinstance(large_file_size, int)
-            else parse_size_bytes(str(large_file_size), default=512 * 1024**2)
-        )
+        large_file_bytes = parse_size_bytes(config.pcap.large_file_size, default=512 * 1024**2)
 
         logger.info(
-            "Starting PARALLEL scan for: %s (max_concurrent=%d, large files >= %d bytes one at a time, exclusions=%s)",
+            "Starting PARALLEL scan for: %s (max_concurrent=%d, files >= %d bytes %d at a time, exclusions=%s)",
             config.pcap.root_directory,
             config.pcap.max_parallel_scans,
             large_file_bytes,
+            config.pcap.large_file_parallel_scans,
             exclude_files,
         )
 
-        try: 
+        try:
             check_cancellation(self.scan_cancel_event)
 
             if not await asyncio.to_thread(os.path.isdir, config.pcap.root_directory):
                 logger.warning(f"Directory '{config.pcap.root_directory}' does not exist. Skipping.")
                 return { "status": "warning", "message": f"Directory '{config.pcap.root_directory}' does not exist.", "indexed_files": 0 }
-            
+
             # Collect all file paths
             all_files, found_matching_folder = await self.collect_files(
                 root_directory=config.pcap.root_directory,
@@ -734,14 +893,18 @@ class ScanService:
 
             # Smallest first, so a few multi-GB captures do not delay the rest
             # from becoming searchable.
+            # A file that vanished since the walk (or a dangling symlink) is
+            # dropped here; one such file used to fail the whole scan.
             sizes = await asyncio.to_thread(
-                lambda: {p: os.path.getsize(p) for p in all_files}
+                lambda: {p: _file_size_or_none(p) for p in all_files}
             )
-            all_files.sort(key=sizes.__getitem__)
+            all_files = sorted((p for p in all_files if sizes[p] is not None), key=sizes.__getitem__)
+            self.scan_status["total_files"] = len(all_files)
+            self.scan_status["message"] = f"Scanning {len(all_files)} files..."
 
             # Prepare shared state
             semaphore = asyncio.Semaphore(config.pcap.max_parallel_scans)
-            large_semaphore = asyncio.Semaphore(1)
+            large_semaphore = asyncio.Semaphore(config.pcap.large_file_parallel_scans)
             seen_hashes_lock = asyncio.Lock() # protect seen_hashes
             seen_hashes : Set[str] = set()
             counter_lock = asyncio.Lock() # protect files_indexed
@@ -778,33 +941,89 @@ class ScanService:
                     pass
                 elif isinstance(result, Exception):
                     logger.error(f"Error processing file {all_files[i]}: {result}")
-            
+
             logger.info("Parallel scan completed successfully. Indexed %d / %d files.", files_indexed_container[0], len(all_files))
 
-            return {"status": "success", "indexed_files": files_indexed_container[0]}
+            removed = 0
+            if target_folder is None:
+                removed = await asyncio.to_thread(
+                    self.prune_missing_files, redis_client, config.pcap.root_directory, set(all_files)
+                )
+            self.scan_status["removed_files"] = removed
+
+            return {"status": "success", "indexed_files": files_indexed_container[0], "removed_files": removed}
 
         except asyncio.CancelledError:
             logger.info(f"Scan cancelled")
             return {"status": "cancelled", "indexed_files": 0}
 
+    def prune_missing_files(self, redis_client, root_directory: str, scanned: Set[str]) -> int:
+        """Remove catalog entries whose file is gone from disk.
+
+        Runs after a complete scan. Entries for deleted files used to stay
+        searchable forever, and downloading them failed with a 500.
+        """
+        if not scanned:
+            # Nothing at all on disk usually means a missing or mistyped mount,
+            # not that every capture was deleted: keep the catalog.
+            logger.warning("No pcap files found under %s; not removing anything from the catalog", root_directory)
+            return 0
+        root = os.path.normpath(root_directory)
+        removed = 0
+        touched: List[str] = []
+        keys = list(redis_client.scan_iter(f"{PCAP_FILE_KEY_PREFIX}:*", count=1000))
+        for start in range(0, len(keys), 1000):
+            batch = keys[start:start + 1000]
+            pipe = redis_client.pipeline(transaction=False)
+            for key in batch:
+                pipe.hgetall(key)
+            for key, stored in zip(batch, pipe.execute()):
+                path = stored.get("path")
+                if not path or path in scanned:
+                    continue
+                inside = os.path.commonpath([root, os.path.normpath(path)]) == root
+                if inside and os.path.lexists(path):
+                    continue  # still there, e.g. excluded from this scan
+                file_hash = key.rsplit(":", 1)[-1]
+                logger.info("Removing %s from the catalog: the file no longer exists", path)
+                touched += remove_catalog_entry(redis_client, file_hash, stored)
+                removed += 1
+
+        # Path map entries left behind by deleted files.
+        stale_paths = [
+            path for path, _ in redis_client.hscan_iter(PATH_MAP_KEY, count=1000)
+            if path not in scanned and not os.path.lexists(path)
+        ]
+        for start in range(0, len(stale_paths), 1000):
+            redis_client.hdel(PATH_MAP_KEY, *stale_paths[start:start + 1000])
+
+        drop_unused_protocols(redis_client, touched)
+        if removed:
+            logger.info("Removed %d deleted files from the catalog", removed)
+        return removed
+
     @with_app_context
-    def scan_wrapper(self, exclude_files=None, *, context: AppContext = None):
+    def scan_wrapper(self, exclude_files=None, target_folder: Optional[str] = None, *, context: AppContext = None):
         redis = context.redis_client
         if not redis:
             logger.error("Redis connection is not available. Scan aborted.")
             return
-        
+
+        if self.scan_status["state"] != ScanState.RUNNING:
+            # Called directly rather than after try_begin_scan().
+            if not self.try_begin_scan():
+                logger.info("A scan is already running; not starting another one.")
+                return
+
         try:
             # dirty the lex indexes
             redis.set(REBUILD_DIRTY, 1)
 
-            self.scan_status["state"] = ScanState.RUNNING
-            self.scan_status["indexed_files"] = 0
             self.scan_status["message"] = "Scanning in progress..."
             logger.info("Background scan started.")
 
             result = asyncio.run(
-                self.scan_and_index(exclude_files=exclude_files)
+                self.scan_and_index(exclude_files=exclude_files, target_folder=target_folder)
             )
             self.scan_status["indexed_files"] = result.get("indexed_files", 0)
 
@@ -814,23 +1033,28 @@ class ScanService:
                     f"Scan cancelled. Indexed {self.scan_status['indexed_files']} files before cancellation."
                 )
                 logger.info("Background scan cancelled.")
+            elif result.get("status") == "warning":
+                self.scan_status["state"] = ScanState.COMPLETED
+                self.scan_status["message"] = result.get("message", "Nothing to scan.")
             else:
                 self.scan_status["state"] = ScanState.COMPLETED
-                self.scan_status["message"] = (
-                    f"Completed successfully. Indexed {self.scan_status['indexed_files']} files."
-                )
+                message = f"Completed successfully. Indexed {self.scan_status['indexed_files']} files."
+                if result.get("removed_files"):
+                    message += f" Removed {result['removed_files']} deleted files."
+                self.scan_status["message"] = message
                 logger.info("Background scan completed.")
         except Exception as e:
             logger.error(f"Scan failed: {e}")
             self.scan_status["state"] = ScanState.FAILED
-            self.scan_status["message"] = str(e)
+            self.scan_status["message"] = f"Last scan failed: {e}"
         finally:
-            if (
-                self.scan_status["state"] != ScanState.FAILED
-                and self.scan_status["state"] != ScanState.IDLE
-            ):
+            self.scan_status["current_files"] = []
+            if self.scan_status["state"] == ScanState.RUNNING:
                 self.scan_status["state"] = ScanState.IDLE
-            
+            # Totals on the dashboard are cached for a few minutes; drop them.
+            with contextlib.suppress(Exception):
+                redis.delete(DASHBOARD_SUMMARY_KEY)
+
             self.__schedule_lex_rebuild__()
 
     async def backfill_total_packets(self, redis_client: Redis) -> dict:
@@ -910,6 +1134,8 @@ class ScanService:
     def rebuild_search_indexes_sync(self, redis_client: Redis) -> dict:
         if not redis_client:
             return {"error": "Redis connection is not available."}
+
+        rebuild_protocol_index_sync(redis_client)
 
         keys = list(redis_client.scan_iter(f"{PCAP_FILE_KEY_PREFIX}:*"))
         total = len(keys)
@@ -1062,7 +1288,7 @@ class ScanService:
             redis = context.redis_client
             if not redis:
                 return
-            
+
             time.sleep(delay_seconds)
             # if new changes happened, abort (another worker will handle it)
             if redis.get(REBUILD_DIRTY) is None:
@@ -1079,7 +1305,7 @@ class ScanService:
                 redis.delete(REBUILD_LOCK)
 
         threading.Thread(target=worker, daemon=True).start()
-    
+
     def _stream_protocol_counts(
         self,
         command: List[str],
@@ -1097,12 +1323,16 @@ class ScanService:
         """
         cancel_event = self.scan_cancel_event
         try:
+            # Binary mode with a big buffer: decoding and stripping ~17M text
+            # lines per GB made Python, not the scanner, the bottleneck (the
+            # tool spent most of its time blocked on a full pipe). Lines are
+            # counted as raw bytes; only the few hundred distinct stacks are
+            # decoded at the end.
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",
+                bufsize=1 << 20,
             )
         except FileNotFoundError:
             logger.error("%s not found - please install it.", tool)
@@ -1116,17 +1346,22 @@ class ScanService:
 
         def drain_stderr():
             for line in process.stderr:
-                stderr_tail.append(line.rstrip())
+                stderr_tail.append(line.decode("utf-8", "replace").rstrip())
 
         stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
         stderr_thread.start()
 
-        stacks: Counter = Counter()
+        raw_stacks: Counter = Counter()
         cancelled = False
         try:
-            for i, line in enumerate(process.stdout):
-                stacks[line.strip()] += 1
-                if i % CANCEL_CHECK_EVERY_LINES == 0 and cancel_event.is_set():
+            while True:
+                # Counter.update on a list counts in C, several times faster
+                # than a Python loop over the lines.
+                batch = list(islice(process.stdout, CANCEL_CHECK_EVERY_LINES))
+                if not batch:
+                    break
+                raw_stacks.update(batch)
+                if cancel_event.is_set():
                     cancelled = True
                     break
         except Exception as e:
@@ -1146,6 +1381,10 @@ class ScanService:
         if cancelled or cancel_event.is_set():
             logger.info("Scan cancelled while %s was reading %s.", tool, pcap_file)
             return None
+
+        stacks: Counter = Counter()
+        for raw, n in raw_stacks.items():
+            stacks[raw.decode("utf-8", "replace").strip()] += n
 
         packets_scanned = sum(stacks.values())
         if process.returncode != 0:
@@ -1215,8 +1454,17 @@ class ScanService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                errors="replace",
             )
             scan_process["tshark"] = process
+
+            # Drain stderr while reading stdout: a tshark that writes many
+            # warnings would otherwise fill the pipe and stall.
+            stderr_tail: deque = deque(maxlen=20)
+            stderr_thread = threading.Thread(
+                target=lambda: stderr_tail.extend(process.stderr), daemon=True
+            )
+            stderr_thread.start()
 
             protocol_counts: Dict[str, int] = {}
             bytes_scanned = 0
@@ -1282,11 +1530,13 @@ class ScanService:
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait()  # reap it, so no zombie is left behind
+            stderr_thread.join(timeout=5)
 
             if scan_cancel_event.is_set():
                 return None
 
-            stderr_output = process.stderr.read() if process.stderr else ""
+            stderr_output = "".join(stderr_tail)
             if process.returncode not in (0, None) and not threshold_reached:
                 stderr_output = stderr_output.strip()
                 if stderr_output:
@@ -1390,15 +1640,19 @@ async def rebuild_lex_sort_indexes(*, context: AppContext = None):
     filename_map: dict[str, list[str]] = {}
     path_map: dict[str, list[str]] = {}
 
-    for key in redis.scan_iter(f"{PCAP_FILE_KEY_PREFIX}:*"):
-        file_hash = key.split(":")[-1]
-
-        fname, fpath = redis.hmget(key, "filename_sort", "path_sort")
-
-        if fname:
-            filename_map.setdefault(fname, []).append(file_hash)
-        if fpath:
-            path_map.setdefault(fpath, []).append(file_hash)
+    # One round trip per 1000 files instead of one per file.
+    keys = list(redis.scan_iter(f"{PCAP_FILE_KEY_PREFIX}:*", count=1000))
+    for start in range(0, len(keys), 1000):
+        batch = keys[start:start + 1000]
+        pipe = redis.pipeline(transaction=False)
+        for key in batch:
+            pipe.hmget(key, "filename_sort", "path_sort")
+        for key, (fname, fpath) in zip(batch, pipe.execute()):
+            file_hash = key.split(":")[-1]
+            if fname:
+                filename_map.setdefault(fname, []).append(file_hash)
+            if fpath:
+                path_map.setdefault(fpath, []).append(file_hash)
 
     # filename sort index
     filenames = await asyncio.to_thread(

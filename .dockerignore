@@ -1,15 +1,27 @@
-# PCAP directory
+# Build context of the backend image is the repository root
+# (docker-compose.yml: context: ., dockerfile: backend/Dockerfile).
+
+# Local data and settings
 pcaps/
+.env
 
-AGENTS.md
-
-# git
+# git and CI
 .git
 .gitignore
+.gitattributes
+.github
 
+# Python leftovers, at any depth
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
 venv/
-__pycache__/
-*.pyc
+
+# Not needed by the backend image
+frontend/
+fast_scan/build/
+main.backup.py
+AGENTS.md
 
 # IDEs and editors
 .vscode/

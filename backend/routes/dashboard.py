@@ -8,7 +8,7 @@ from enum import Enum
 import asyncio
 import os
 
-from services.scan import PCAP_FILE_KEY_PREFIX
+from services.scan import PCAP_FILE_KEY_PREFIX, _parse_float, _parse_int
 from services.logger import get_logger
 from services.context import get_app_context, AppContext
 
@@ -18,6 +18,10 @@ logger = get_logger(__name__)
 DASHBOARD_STATUS_KEY = "dashboard:status"
 DASHBOARD_SUMMARY_KEY = "dashboard:summary"
 DASHBOARD_TTL_SECONDS = 300  # 5 minutes
+# The "processing" flag expires on its own: a build that died (backend
+# restarted mid-way) used to leave it set, and the dashboard answered 202
+# "processing" forever.
+DASHBOARD_PROCESSING_TTL_SECONDS = 120
 
 class DASHBOARD_STATUS(Enum):
     IDLE = "idle"
@@ -34,7 +38,7 @@ async def dashboard_summary(refresh: bool = Query(False), context: AppContext = 
             content={"error": "Service unavailable"},
         )
 
-    summary = redis.get(DASHBOARD_SUMMARY_KEY)
+    summary = await asyncio.to_thread(redis.get, DASHBOARD_SUMMARY_KEY)
     if summary and not refresh:
         return JSONResponse(
             status_code=200,
@@ -44,7 +48,7 @@ async def dashboard_summary(refresh: bool = Query(False), context: AppContext = 
             },
         )
 
-    status = redis.get(DASHBOARD_STATUS_KEY)
+    status = await asyncio.to_thread(redis.get, DASHBOARD_STATUS_KEY)
 
     if status == DASHBOARD_STATUS.PROCESSING.value:
         return JSONResponse(
@@ -58,7 +62,9 @@ async def dashboard_summary(refresh: bool = Query(False), context: AppContext = 
             content={"status": DASHBOARD_STATUS.ERROR.value},
         )
 
-    asyncio.create_task(build_dashboard_summary(context))
+    # In a worker thread: the build walks the whole catalog with blocking
+    # Redis calls, which froze every other request while it ran on the loop.
+    asyncio.get_running_loop().run_in_executor(context.thread_executor, build_dashboard_summary_sync, context)
 
     return JSONResponse(
         status_code=202,
@@ -98,13 +104,18 @@ def _bucketize(value: float, buckets):
     return "unknown"
 
 
-async def build_dashboard_summary(context: AppContext):
+def build_dashboard_summary_sync(context: AppContext):
     redis = context.redis_client
     config = context.config
     now = time.time()
     root_dir = config.pcap.root_directory.rstrip(os.sep)
 
-    redis.set(DASHBOARD_STATUS_KEY, DASHBOARD_STATUS.PROCESSING.value)
+    # nx: a second request while a build runs does not start another one
+    if not redis.set(DASHBOARD_STATUS_KEY, DASHBOARD_STATUS.PROCESSING.value,
+                     ex=DASHBOARD_PROCESSING_TTL_SECONDS, nx=True):
+        if redis.get(DASHBOARD_STATUS_KEY) == DASHBOARD_STATUS.PROCESSING.value:
+            return
+        redis.set(DASHBOARD_STATUS_KEY, DASHBOARD_STATUS.PROCESSING.value, ex=DASHBOARD_PROCESSING_TTL_SECONDS)
 
     try:
         size_dist = defaultdict(int)
@@ -132,15 +143,18 @@ async def build_dashboard_summary(context: AppContext):
                 count=500,
             )
 
+            pipe = redis.pipeline(transaction=False)
             for key in keys:
-                data = redis.hgetall(key)
+                pipe.hgetall(key)
+            for data in pipe.execute():
                 if not data:
                     continue
 
-                size_bytes = int(data.get("size_bytes", 0))
-                packet_count = int(data.get("total_packets", 0))
+                # Fields can be empty ("" when capinfos failed): count them as 0.
+                size_bytes = _parse_int(data.get("size_bytes")) or 0
+                packet_count = _parse_int(data.get("total_packets")) or 0
                 protocols = [p for p in data.get("protocols", "").split(',') if p]
-                last_modified = float(data.get("last_modified", now))
+                last_modified = _parse_float(data.get("last_modified")) or now
                 file_path = data.get("path", "")
                 scan_mode = data.get("scan_mode", "full").lower()
 
@@ -198,7 +212,7 @@ async def build_dashboard_summary(context: AppContext):
                     relative_path = file_path
                     if file_path.startswith(root_dir):
                         relative_path = file_path[len(root_dir):].lstrip(os.sep)
-                    
+
                     dir_name = os.path.dirname(relative_path)
                     if not dir_name:
                         directory_dist["(root)"] += 1
@@ -246,5 +260,7 @@ async def build_dashboard_summary(context: AppContext):
 
     except Exception as e:
         logger.error(f"Error building dashboard summary: {e}")
-        redis.set(DASHBOARD_STATUS_KEY, DASHBOARD_STATUS.ERROR.value, ex=30)
-        raise
+        try:
+            redis.set(DASHBOARD_STATUS_KEY, DASHBOARD_STATUS.ERROR.value, ex=30)
+        except Exception:
+            pass

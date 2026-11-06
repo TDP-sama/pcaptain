@@ -11,7 +11,7 @@ from pcap_builder import write_pcap
 
 @requires_tshark
 def test_full_scan_indexes_every_capture(ctx, sample_pcaps):
-    assert run_scan(ctx) == {"status": "success", "indexed_files": 3}
+    assert run_scan(ctx) == {"status": "success", "indexed_files": 3, "removed_files": 0}
     sip = stored(ctx, sample_pcaps["sip"])
     assert set(sip["protocols"].split(",")) >= {"eth", "ip", "udp", "sip"}
     assert sip["total_packets"] == "3"      # counted during the scan, no capinfos pass

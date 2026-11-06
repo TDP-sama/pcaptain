@@ -40,9 +40,10 @@
                 <table id="protocolTable" class="protocol-table">
                     <thead>
                         <tr>
-                            <th class="sortable" data-sort="protocol" title="Sort by protocol">Protocol <i class="fa fa-sort" aria-hidden="true"></i></th>
-                            <th class="sortable num" data-sort="percent" title="Sort by share of packets">% <i class="fa fa-sort" aria-hidden="true"></i></th>
-                            <th class="sortable num" data-sort="count" title="Sort by packet count">Packets <i class="fa fa-sort" aria-hidden="true"></i></th>
+                            <!-- a button in each header: sortable with the keyboard too -->
+                            <th class="sortable" data-sort="protocol" aria-sort="none"><button type="button" class="sort-btn" title="Sort by protocol">Protocol <i class="fa fa-sort" aria-hidden="true"></i></button></th>
+                            <th class="sortable num" data-sort="percent" aria-sort="none"><button type="button" class="sort-btn" title="Sort by share of packets">% <i class="fa fa-sort" aria-hidden="true"></i></button></th>
+                            <th class="sortable num" data-sort="count" aria-sort="none"><button type="button" class="sort-btn" title="Sort by packet count">Packets <i class="fa fa-sort" aria-hidden="true"></i></button></th>
                             <th><span class="sr-only">Export</span></th>
                         </tr>
                     </thead>

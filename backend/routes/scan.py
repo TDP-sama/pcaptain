@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
-from services.config import ScanMode, save_scan_mode
+from services.config import ScanMode, save_runtime_scan_mode
 from services.context import get_app_context, AppContext
 from typing import Optional, List
 from fastapi import Depends, Query, Request, HTTPException
@@ -22,28 +22,39 @@ async def reindex_pcaps(
     context: AppContext = Depends(get_app_context),
 ):
 
+    return await _start_scan(context, exclude=exclude)
+
+
+async def _start_scan(context: AppContext, *, exclude=None, target_folder: Optional[str] = None):
+    # A scan cannot do anything without Redis: say so now instead of answering
+    # "started" and failing in the background.
+    state = await asyncio.to_thread(context.redis_state)
+    if state != "ready":
+        detail = ("The catalog is still loading, try again in a few seconds."
+                  if state == "loading" else "The catalog database (Redis) is not reachable.")
+        return JSONResponse(content={"status": "unavailable", "detail": detail}, status_code=503)
+
     scan_service = get_scan_service()
-    if scan_service.scan_status["state"] == ScanState.RUNNING:
+    # Checked and marked "running" in one step, so two quick clicks cannot
+    # start two scans.
+    if not scan_service.try_begin_scan():
         return JSONResponse(
             content={"status": "busy", "message": "A scan is already running."},
             status_code=409,
         )
-    scan_service.scan_cancel_event.clear()
 
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(
+    asyncio.get_running_loop().run_in_executor(
         context.thread_executor,
-        lambda: scan_service.scan_wrapper(
-            exclude_files=exclude
-        ),
+        lambda: scan_service.scan_wrapper(exclude_files=exclude, target_folder=target_folder),
     )
     return JSONResponse(content={"status": "started"})
 
 
 @router.get("/scan-status")
 async def scan_status_endpoint():
-    scan_service = get_scan_service()
-    return scan_service.scan_status
+    """State of the current or last scan. While a scan runs, total_files,
+    processed_files and current_files (being scanned right now) show progress."""
+    return get_scan_service().status_snapshot()
 
 
 @router.post("/backfill/total-packets", summary="Backfill total packet counts for existing pcaps")
@@ -144,13 +155,13 @@ async def update_scan_config(
         raise HTTPException(status_code=409, detail="A scan is running. Change the mode after it finishes.")
 
     previous = context.config.pcap.scan_mode
+    # Stored in Redis (survives restarts with the catalog), not in a config file:
+    # the image's config.yaml is read-only defaults and is not mounted.
+    await asyncio.to_thread(save_runtime_scan_mode, context.redis_client, body.scan_mode)
     context.config.pcap.scan_mode = body.scan_mode
-    persisted = await asyncio.to_thread(save_scan_mode, body.scan_mode)
-    if not persisted:
-        logger.warning("Scan mode changed to %s for this run only; config.yaml was not updated", body.scan_mode.value)
-    logger.info("Scan mode changed from %s to %s", previous.value, body.scan_mode.value)
+    logger.info("Scan mode changed from %s to %s", ScanMode(previous).value, body.scan_mode.value)
 
-    return {**(await scan_config(context=context)), "persisted": persisted}
+    return {**(await scan_config(context=context)), "persisted": True}
 
 
 @router.post(
@@ -160,12 +171,8 @@ async def reindex_specific_folder(
     folder_name: str,
     request: Request,
     exclude: Optional[List[str]] = Query(None),
+    context: AppContext = Depends(get_app_context),
 ):
-    scan_service = get_scan_service()
-    result = await scan_service.scan_and_index(
-        exclude_files=exclude,
-        target_folder=folder_name,
-    )
-    if "error" in result:
-        raise HTTPException(status_code=500, detail=result["error"])
-    return JSONResponse(content=result)
+    # Runs in the background like /reindex, under the same "one scan at a
+    # time" rule (it used to run inside the request, next to any other scan).
+    return await _start_scan(context, exclude=exclude, target_folder=folder_name)

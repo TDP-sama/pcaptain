@@ -7,13 +7,13 @@
     <title>pcaptain</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+    <link rel="stylesheet" href="/vendor/font-awesome/css/font-awesome.min.css">
     <link rel="stylesheet" href="/base.css?v=20261104b">
     <link rel="stylesheet" href="/search-style.css?v=20261104b">
     <link rel="stylesheet" href="toast-style.css">
     <link rel="stylesheet" href="/info-modal-style.css?v=20261104b">
     <!-- info-modal.js still uses axios -->
-    <script src="https://cdn.jsdelivr.net/npm/axios@1.7.9/dist/axios.min.js"></script>
+    <script src="/vendor/axios.min.js"></script>
     <script>
         fetch('info-modal.html')
             .then(r => r.text())
@@ -97,6 +97,7 @@
         </aside>
 
         <main class="results" aria-live="polite">
+            <h1 class="sr-only">Search captures</h1>
             <div class="results-head">
                 <p id="resultSummary" class="summary">Loading catalog…</p>
                 <div class="sort-controls">

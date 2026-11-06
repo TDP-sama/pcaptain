@@ -54,3 +54,9 @@ def test_wanted_protocols_cover_all_and_any():
 def test_a_lone_dash_or_bang_is_not_a_negation():
     # "-" alone is a (filename) word, not "exclude nothing"
     assert conditions("-") == {"name": ["-"]}
+
+
+def test_or_group_of_unknown_words_matches_nothing():
+    q = parse_query("foo|bar", KNOWN)
+    assert q.impossible and not q.is_empty()
+    assert not parse_query("!foo|bar", KNOWN).impossible   # excluding nothing is fine

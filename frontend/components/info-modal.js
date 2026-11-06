@@ -24,7 +24,29 @@ function closeInfoModal() {
     if (!modal || modal.hidden) return;
     modal.hidden = true;
     document.getElementById("infoBackdrop").hidden = true;
+    document.documentElement.classList.remove("drawer-open");   // page scrolls again
     if (opener) opener.focus();
+}
+
+// The drawer is modal (aria-modal): Tab and Shift+Tab cycle through its own
+// controls instead of wandering into the page behind it.
+function trapFocus(e) {
+    const modal = document.getElementById("infoModal");
+    if (e.key !== "Tab" || !modal || modal.hidden) return;
+    const focusable = [...modal.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+    )].filter(el => el.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const inside = modal.contains(document.activeElement);
+    if (e.shiftKey && (document.activeElement === first || !inside)) {
+        e.preventDefault();
+        last.focus();
+    } else if (!e.shiftKey && (document.activeElement === last || !inside)) {
+        e.preventDefault();
+        first.focus();
+    }
 }
 
 document.addEventListener("click", (e) => {
@@ -37,6 +59,7 @@ document.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeInfoModal();
+    trapFocus(e);
 });
 
 export function openInfoModal(file, event) {
@@ -58,7 +81,7 @@ export function openInfoModal(file, event) {
     })(file.size_bytes);
     document.getElementById("infoPackets").innerText = file.total_packets || 0;
     document.getElementById("infoPacketsScanned").innerText = file.packets_scanned || "N/A";
-    
+
     document.getElementById("infoModified").innerText = formatDate(file.last_modified);
     document.getElementById("infoScanned").innerText = formatDate(file.last_scanned);
     const scanModeValue = SCAN_MODE_TEXT[file.scan_mode] || "Full";
@@ -84,6 +107,7 @@ export function openInfoModal(file, event) {
 
     document.getElementById("infoBackdrop").hidden = false;
     modal.hidden = false;
+    document.documentElement.classList.add("drawer-open");      // no scrolling behind the drawer
     document.getElementById("infoClose").focus();
 }
 
@@ -97,7 +121,7 @@ let searchListenerAttached = false;
 function renderProtocolTable(file) {
     resetSortState();
     resetSearchInput();
-    
+
     const tbody = document.getElementById("protocolTableBody");
     if (!tbody) return;
     tbody.innerHTML = "";
@@ -135,12 +159,12 @@ function renderProtocolTable(file) {
     currentProtocolData = [...allProtocolData];
 
     renderTableRows(file);
-    
+
     if (!sortListenersAttached) {
         attachSortListeners(file);
         sortListenersAttached = true;
     }
-    
+
     if (!searchListenerAttached) {
         attachSearchListener(file);
         searchListenerAttached = true;
@@ -186,12 +210,12 @@ function attachSortListeners(file) {
     sortHeaders.forEach(th => {
         // Remove any existing listener first to prevent duplicates
         th.removeEventListener("click", th._sortClickHandler);
-        
+
         // Create and store the handler
         th._sortClickHandler = (e) => {
             e.stopPropagation();
             const sortColumn = th.getAttribute("data-sort");
-            
+
             if (currentSortColumn === sortColumn) {
                 currentSortAscending = !currentSortAscending;
             } else {
@@ -203,7 +227,7 @@ function attachSortListeners(file) {
             renderTableRows(file);
             updateSortIcons(sortColumn, currentSortAscending);
         };
-        
+
         th.addEventListener("click", th._sortClickHandler);
     });
 }
@@ -228,11 +252,13 @@ function updateSortIcons(activeColumn, ascending) {
     sortHeaders.forEach(th => {
         const icon = th.querySelector("i");
         const column = th.getAttribute("data-sort");
-        
+
         if (column === activeColumn) {
             icon.className = ascending ? "fa fa-sort-asc" : "fa fa-sort-desc";
+            th.setAttribute("aria-sort", ascending ? "ascending" : "descending");
         } else {
             icon.className = "fa fa-sort";
+            th.setAttribute("aria-sort", "none");
         }
     });
 }
@@ -240,28 +266,28 @@ function updateSortIcons(activeColumn, ascending) {
 function attachSearchListener(file) {
     const searchInput = document.getElementById("protocolSearchInput");
     if (!searchInput) return;
-    
+
     searchInput.removeEventListener("input", searchInput._searchHandler);
-    
+
     searchInput._searchHandler = (e) => {
         const query = e.target.value.toLowerCase().trim();
-        
+
         if (query === "") {
             currentProtocolData = [...allProtocolData];
         } else {
-            currentProtocolData = allProtocolData.filter(p => 
+            currentProtocolData = allProtocolData.filter(p =>
                 p.protocol.toLowerCase().includes(query)
             );
         }
-        
+
         // Re-apply current sort if any
         if (currentSortColumn) {
             sortProtocolData(currentSortColumn, currentSortAscending);
         }
-        
+
         renderTableRows(file);
     };
-    
+
     searchInput.addEventListener("input", searchInput._searchHandler);
 }
 
@@ -279,7 +305,7 @@ function resetSortState() {
     currentProtocolData = [];
     allProtocolData = [];
     sortListenersAttached = false;
-    
+
     // Reset all sort icons to default
     const sortHeaders = document.querySelectorAll("th.sortable");
     sortHeaders.forEach(th => {
@@ -287,5 +313,6 @@ function resetSortState() {
         if (icon) {
             icon.className = "fa fa-sort";
         }
+        th.setAttribute("aria-sort", "none");
     });
 }

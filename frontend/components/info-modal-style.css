@@ -51,6 +51,13 @@
 }
 .protocol-table th.sortable { cursor: pointer; user-select: none; }
 .protocol-table th.sortable:hover { color: var(--brand); }
+.protocol-table .sort-btn {
+    all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 0;
+    font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit;
+}
+.protocol-table .sort-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 2px; }
+/* page behind the open details drawer does not scroll */
+html.drawer-open, html.drawer-open body { overflow: hidden; }
 .protocol-table th i { margin-left: 3px; font-size: 10px; }
 .protocol-table td { padding: 6px 10px; border-bottom: 1px solid var(--line); }
 .protocol-table tbody tr:last-child td { border-bottom: 0; }

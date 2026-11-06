@@ -59,13 +59,16 @@ class ParsedQuery:
     not_name: list[str] = field(default_factory=list)
     # Parts of an OR group that are not known protocols; reported, not searched.
     unknown: list[str] = field(default_factory=list)
+    # An OR group none of whose parts is a known protocol ("foo|bar") can match
+    # no file. It used to be dropped, which left an empty query: every file.
+    impossible: bool = False
 
     @property
     def wanted_protocols(self) -> set[str]:
         return set(self.all) | {p for group in self.any for p in group}
 
     def is_empty(self) -> bool:
-        return not (self.all or self.any or self.none or self.name or self.not_name)
+        return not (self.all or self.any or self.none or self.name or self.not_name or self.impossible)
 
 
 def _tokenize(raw: str) -> list[str]:
@@ -113,6 +116,8 @@ def parse_query(raw: str, known_protocols: set[str]) -> ParsedQuery:
             group = [p for p in parts if p in known_protocols]
             q.unknown.extend(p for p in parts if p not in known_protocols)
             if not group:
+                if not negate:
+                    q.impossible = True  # "!(foo|bar)" excludes nothing; "foo|bar" matches nothing
                 continue
             if negate:
                 # !(a|b) == !a !b
@@ -138,6 +143,8 @@ def _proto_key(protocol: str) -> str:
 
 def _matching_ids(redis, q: ParsedQuery) -> set[str]:
     """Evaluate a parsed query with Redis set operations. Runs in a thread."""
+    if q.impossible:
+        return set()
     if q.all:
         ids = redis.sinter([_proto_key(p) for p in q.all])
     elif q.any:

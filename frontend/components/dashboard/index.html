@@ -7,10 +7,10 @@
     <title>pcaptain · Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+    <link rel="stylesheet" href="/vendor/font-awesome/css/font-awesome.min.css">
     <link rel="stylesheet" href="/base.css?v=20261104b">
     <link rel="stylesheet" href="/dashboard/dashboard-style.css?v=20261104b">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="/vendor/chart.umd.min.js"></script>
 </head>
 
 <body>
@@ -38,6 +38,7 @@
     <p id="statusLine" class="status-line" role="status">Loading the catalog summary…</p>
 
     <main id="dashboard" class="dashboard" aria-busy="true">
+        <h1 class="sr-only">Catalog dashboard</h1>
         <section class="tiles" aria-label="Catalog totals">
             <div class="tile"><span class="tile-label">Captures</span><span class="tile-value" id="tileFiles">–</span></div>
             <div class="tile"><span class="tile-label">Total size</span><span class="tile-value" id="tileSize">–</span></div>
@@ -63,7 +64,7 @@
             <div class="card-head">
                 <div>
                     <h2>Common protocol stacks</h2>
-                    <p class="card-sub">Captures that contain exactly the same set of protocols. Click a row to find them.</p>
+                    <p class="card-sub">How many captures have exactly this set of protocols. A click searches for captures containing all of them, which can include captures with more protocols.</p>
                 </div>
             </div>
             <ol id="comboList" class="rank-list"></ol>

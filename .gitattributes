@@ -1,0 +1,11 @@
+# Shell scripts and configs run inside Linux containers: always LF, even when
+# the repository is checked out on Windows (CRLF breaks the entrypoints).
+* text=auto eol=lf
+
+# Binary files
+*.pcap binary
+*.pcapng binary
+*.cap binary
+*.woff binary
+*.woff2 binary
+*.png binary

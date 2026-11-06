@@ -46,7 +46,10 @@ def ctx(tmp_path, monkeypatch):
     yield context
     # ScanService keeps these on the class; never leak them into the next test
     ScanService.scan_cancel_event.clear()
-    ScanService.scan_status["state"] = ScanState.IDLE
+    ScanService.scan_status.update(
+        state=ScanState.IDLE, indexed_files=0, total_files=0, processed_files=0,
+        current_files=[], removed_files=0,
+    )
 
 
 @pytest.fixture

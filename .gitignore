@@ -5,5 +5,20 @@ pcaps/
 .env
 
 AGENTS.md
-# Python bytecode
+
+# Python
 __pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# fastscan build output
+fast_scan/build/
+
+# IDEs, editors and OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
